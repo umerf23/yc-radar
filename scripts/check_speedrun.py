@@ -4,9 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import load_config
-from app.state import Store
 from app.sources.yc_speedrun import SpeedrunSource
-
+from app.state import Store
 
 config = load_config()
 store = Store(config.db_path)

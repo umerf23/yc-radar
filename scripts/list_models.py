@@ -9,7 +9,6 @@ from google import genai
 
 from app.config import load_config
 
-
 config = load_config()
 client = genai.Client(api_key=config.llm_api_key)
 

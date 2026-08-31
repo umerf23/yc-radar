@@ -14,7 +14,6 @@ from app.models import (
 )
 from app.notifier import Notifier
 
-
 config = load_config()
 notifier = Notifier(config)
 

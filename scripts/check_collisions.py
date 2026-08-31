@@ -15,7 +15,6 @@ sys.path.insert(
 
 from app.models import _normalise
 
-
 ALL_COMPANIES_URL = (
     "https://yc-oss.github.io/api/companies/all.json"
 )

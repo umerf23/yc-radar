@@ -7,7 +7,6 @@ from app.config import load_config
 from app.sources.linkedin import LinkedInSource
 from app.state import Store
 
-
 config = load_config()
 store = Store(config.db_path)
 source = LinkedInSource(config, store)

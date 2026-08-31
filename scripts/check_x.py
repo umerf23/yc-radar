@@ -4,8 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.config import load_config
-from app.state import Store
 from app.sources.x_twitter import XTwitterSource
+from app.state import Store
 
 config = load_config()
 store = Store(config.db_path)
@@ -33,10 +33,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.config import load_config
-from app.state import Store
-from app.sources.x_twitter import XTwitterSource
+from datetime import UTC
 
+from app.config import load_config
+from app.sources.x_twitter import XTwitterSource
+from app.state import Store
 
 # Default to a week so a test run has something to find.
 hours = 168
@@ -64,9 +65,9 @@ class TestStore:
         self._hours = hours
 
     def since_timestamp(self, source: str, lookback_hours: int) -> int:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        start = datetime.now(timezone.utc) - timedelta(hours=self._hours)
+        start = datetime.now(UTC) - timedelta(hours=self._hours)
 
         return int(start.timestamp())
 

@@ -1,4 +1,5 @@
 import os
+
 import requests
 from dotenv import load_dotenv
 
@@ -17,8 +18,12 @@ payload = {
 }
 headers = {"X-API-KEY": api_key, "Content-Type": "application/json"}
 
-response = requests.post("https://google.serper.dev/search", json=payload, headers=headers, timeout=30)
-
+response = requests.post(
+    "https://google.serper.dev/search",
+    json=payload,
+    headers=headers,
+    timeout=30,
+)
 if response.status_code != 200:
     raise SystemExit(f"Request failed with status {response.status_code}: {response.text[:300]}")
 
