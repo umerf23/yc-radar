@@ -125,5 +125,11 @@ def load_config(yaml_path: Path | None = None) -> Config:
     if config.is_source_enabled("linkedin") and not config.serper_key:
         print("Warning: linkedin is enabled but SERPER_KEY is empty. It will be skipped.")
 
+    # Deployment override. Keeping the database outside the checkout
+    # means a redeploy cannot wipe the register or the dedup history.
+    db_override = _optional("YC_RADAR_DB_PATH")
+    if db_override:
+        config.db_path = Path(db_override)
+
     config.db_path.parent.mkdir(parents=True, exist_ok=True)
     return config

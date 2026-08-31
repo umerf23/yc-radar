@@ -10,6 +10,7 @@ Usage:
   python -m app.main --once     run a single cycle and exit
 """
 
+import os
 import sys
 import threading
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from fastapi import FastAPI
 
 from app.config import load_config
 from app.pipeline import Pipeline
+from app.state import Store
 
 # Shared state between the scheduler thread and the HTTP handlers.
 _last_run: dict[str, Any] = {}
@@ -40,8 +42,11 @@ def health() -> dict[str, Any]:
     Reports 'starting' before the first cycle completes, so a monitor
     does not read an empty result as a failure during boot.
     """
+    # A Store, not a Pipeline. Building a Pipeline would construct the
+    # LLM and Slack clients on every health poll, which a monitoring
+    # system hits constantly.
     config = load_config()
-    pipeline_store = Pipeline(config).store
+    pipeline_store = Store(config.db_path)
 
     return {
         "status": "ok" if _last_run else "starting",
@@ -119,7 +124,7 @@ def main() -> None:
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=int(os.getenv("PORT", "8000")),
         log_level="info",
     )
 
