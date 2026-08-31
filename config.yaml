@@ -55,5 +55,6 @@ slack:
   confirmed_channel: ""
 
 classifier:
-  min_confidence: 0.7
-  model: "gemini-3.5-flash-lite"
+min_confidence: 0.7 
+model: "gemini-3.5-flash-lite" 
+seconds_between_calls: 2.0

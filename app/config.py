@@ -115,7 +115,7 @@ def load_config(yaml_path: Path | None = None) -> Config:
         lookback_hours=int(raw.get("lookback_hours", 10)),
         sources=raw.get("sources", {}),
         slack_routing=raw.get("slack", {}),
-        classifier=raw.get("classifier", {}),
+        classifier=raw.get("classifier") or {},
     )
 
     # Warn rather than crash when an enabled source has no credentials.

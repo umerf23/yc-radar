@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from app.models import Candidate, _normalise
+from app.models import Candidate, _normalise, canonical_batch
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS seen_candidates (
@@ -202,7 +202,7 @@ class Store:
         companies, and collapsing them would suppress alerts for the
         newer one.
         """
-        key = f"{_normalise(name)}|{_normalise(batch)}"
+        key = f"{_normalise(name)}|{canonical_batch(batch)}"
 
         with self._connect() as conn:
             conn.execute(
@@ -245,23 +245,17 @@ class Store:
         if not name_key:
             return False
 
+        batch_key = canonical_batch(batch)
+
         with self._connect() as conn:
-            if batch:
+            if batch_key:
                 row = conn.execute(
-                    """
-                    SELECT 1
-                    FROM yc_official
-                    WHERE normalised_name = ?
-                    """,
-                    (f"{name_key}|{_normalise(batch)}",),
+                    "SELECT 1 FROM yc_official WHERE normalised_name = ?",
+                    (f"{name_key}|{batch_key}",),
                 ).fetchone()
             else:
                 row = conn.execute(
-                    """
-                    SELECT 1
-                    FROM yc_official
-                    WHERE normalised_name LIKE ?
-                    """,
+                    "SELECT 1 FROM yc_official WHERE normalised_name LIKE ?",
                     (f"{name_key}|%",),
                 ).fetchone()
 

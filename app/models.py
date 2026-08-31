@@ -53,6 +53,57 @@ def _normalise(text: str) -> str:
         lowered,
     )
 
+# YC batch letter codes. Spring is X because S was already taken by Summer.
+SEASON_TO_CODE = {
+    "winter": "w",
+    "spring": "x",
+    "summer": "s",
+    "fall": "f",
+    "autumn": "f",
+}
+
+_SPEEDRUN_COHORT = re.compile(r"\bsr[\s\-_]?(\d{1,3})\b")
+
+_SEASON_YEAR = re.compile(
+    r"\b(winter|spring|summer|fall|autumn)\s*'?\s*(\d{2}|\d{4})\b"
+)
+
+_SHORT_CODE = re.compile(r"\b([wxsf])\s*'?\s*(\d{2})\b")
+
+
+def canonical_batch(raw: str) -> str:
+    """
+    Reduce any batch label to one comparable token.
+
+    The YC directory publishes 'Fall 2026'. Founders write 'YC F26'.
+    a16z uses 'SR007', while its own pages sometimes say only 'Speedrun'.
+    Comparing those strings directly always fails, which silently turns
+    every already-listed company into a false early signal.
+
+    Returns an empty string when no batch can be identified. Callers must
+    treat that as 'unknown' rather than as a match.
+    """
+    if not raw:
+        return ""
+
+    text = raw.lower().strip()
+
+    cohort = _SPEEDRUN_COHORT.search(text)
+    if cohort:
+        return f"sr{int(cohort.group(1)):03d}"
+
+    if "speedrun" in text:
+        return "speedrun"
+
+    season = _SEASON_YEAR.search(text)
+    if season:
+        return f"yc{SEASON_TO_CODE[season.group(1)]}{season.group(2)[-2:]}"
+
+    short = _SHORT_CODE.search(text)
+    if short:
+        return f"yc{short.group(1)}{short.group(2)}"
+
+    return ""
 
 @dataclass
 class Candidate:

@@ -70,6 +70,11 @@ Set is_announcement to FALSE when:
 Set is_announcement to TRUE only when the author is clearly stating that
 they, or their company, have just been accepted or backed.
 
+Valid YC batch codes are W, X, S or F followed by two digits, for
+example "YC S26" or "YC F26". X means Spring. If a post names a
+batch that does not fit this pattern, return an empty string for
+batch rather than repeating what the post said.
+
 Never invent a company name. If the post does not state one, return an
 empty string for company_name.
 
@@ -131,8 +136,9 @@ class Classifier:
         self.config = config
         self.store = store
         self._min_seconds = float(
-            config.classifier.get("second_between_calls", 2.0)
+            config.classifier.get("seconds_between_calls", 2.0)
         )
+
         self.min_confidence = float(
             config.classifier.get("min_confidence", 0.7)
         )
@@ -378,6 +384,12 @@ class Classifier:
         else:
             candidate.status = STATUS_EARLY_SIGNAL
             candidate.extra["already_listed"] = False
+
+        # A candidate with no extracted company name was never checked
+        # against the register, because there was nothing to look up.
+        # Calling that an early signal would assert something unverified,
+        # so the alert is flagged and the founder handle carries it.
+        candidate.extra["register_checked"] = bool(candidate.company_name)
 
         return candidate
 

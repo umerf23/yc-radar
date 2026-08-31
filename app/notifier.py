@@ -161,11 +161,18 @@ class Notifier:
             f"*Source*\n{self._source_label(candidate.source)}"
         )
 
-        status_text = (
-            "Founder announced, not yet listed officially"
-            if early
-            else "Confirmed by the programme's directory"
-        )
+        if early and not candidate.extra.get("register_checked", True):
+            # No company name was extracted, so the official register was
+            # never queried. Say so rather than implying a verified scoop.
+            status_text = (
+                "Founder announced. Company not named in the post, "
+                "so this was not checked against the official register"
+            )
+        elif early:
+            status_text = "Founder announced, not yet listed officially"
+        else:
+            status_text = "Confirmed by the programme's directory"
+
 
         fields.append(f"*Status*\n{status_text}")
 

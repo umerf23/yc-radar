@@ -45,7 +45,7 @@ MAX_PAGES = 3
 # rather than fired in a tight loop, and 429 responses back off and retry
 # instead of dropping the query entirely. Four seconds was the value that
 # stopped triggering limits in testing; lower it if your tier allows.
-MIN_SECONDS_BETWEEN_REQUESTS = 4.0
+MIN_SECONDS_BETWEEN_REQUESTS = 8
 
 MAX_RETRIES = 3
 BACKOFF_SECONDS = 5

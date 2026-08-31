@@ -68,6 +68,21 @@ NOISE_MARKERS = (
 # At least one must appear. Kept broader than the X equivalent because
 # Serper snippets are truncated, so the acceptance phrase is sometimes
 # cut off even when the post itself contains it.
+# An acceptance phrase alone is not enough. The post must also name
+# YC or Speedrun so unrelated accelerator announcements are filtered out.
+PROGRAMME_MARKERS = (
+    "y combinator",
+    "ycombinator",
+    "yc s2",
+    "yc w2",
+    "yc f2",
+    "yc x2",
+    " yc ",
+    "(yc",
+    "speedrun",
+    "a16z",
+)
+
 ACCEPTANCE_MARKERS = (
     "accepted into",
     "accepted to",
@@ -81,10 +96,9 @@ ACCEPTANCE_MARKERS = (
     "a16z speedrun",
     "joining speedrun",
     "backed by a16z",
-    "excited to share",
-    "thrilled to share",
-    "excited to announce",
-    "proud to announce",
+  "a16z speedrun", 
+  "joining speedrun", 
+  "backed by a16z", 
 )
 
 
@@ -284,10 +298,16 @@ class LinkedInSource(Source):
             if marker in combined:
                 return False
 
-        return any(
+        has_acceptance = any(
             marker in combined
             for marker in ACCEPTANCE_MARKERS
         )
+        has_programme = any(
+            marker in combined
+            for marker in PROGRAMME_MARKERS
+        )
+
+        return has_acceptance and has_programme
 
     # ---------- conversion ----------
 
