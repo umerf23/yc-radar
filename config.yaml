@@ -1,0 +1,59 @@
+poll_interval_hours: 8
+lookback_hours: 10
+
+sources:
+  yc_directory:
+    enabled: true
+    url: "https://www.ycombinator.com/companies"
+
+  yc_speedrun:
+    enabled: true
+    url: "https://www.ycombinator.com/speedrun"
+
+  x_twitter:
+    enabled: true
+    max_results_per_query: 40
+
+    # Batch codes currently worth watching. YC runs four batches a year:
+    # Winter, Spring (X), Summer, Fall. Update this list when a new batch
+    # opens rather than editing any Python.
+    active_batch_codes: ["S26", "F26", "W27", "X27"]
+
+    queries:
+      # First-person YC acceptance. The exclusions matter as much as the
+      # phrases: replies are almost never announcements, and retweets
+      # duplicate posts we have already seen.
+      - '("we got into YC" OR "we got into Y Combinator" OR "accepted into YC" OR "joining Y Combinator" OR "we are in YC" OR "we''re in YC") -filter:replies -filter:retweets lang:en'
+
+      # Batch codes paired with first-person framing.
+      - '("YC S26" OR "YC F26" OR "YC W27" OR "YC X27") (we OR our OR "I''m" OR excited OR announcing) -filter:replies -filter:retweets lang:en'
+
+      # a16z Speedrun. Cohort labels run SR001 upward.
+      - '("a16z speedrun" OR "SR007" OR "SR008") (joining OR accepted OR backed OR "part of" OR excited) -filter:replies -filter:retweets lang:en'
+
+      # Launch language near YC mentions. Broadest query, most noise,
+      # but it catches announcements that use none of the stock phrases.
+      - '("excited to announce" OR "thrilled to share" OR "big news") ("Y Combinator" OR "YC") -filter:replies -filter:retweets lang:en'
+  linkedin:
+    enabled: true
+    max_results_per_query: 10
+
+    # Serper searches Google's index, so results skew toward posts that
+    # have been indexed rather than the very newest. The time filter
+    # narrows to the past week on each run; the state layer handles
+    # deduplication of anything seen before.
+    queries:
+      - 'site:linkedin.com/posts ("accepted into Y Combinator" OR "accepted into YC" OR "got into YC")'
+      - 'site:linkedin.com/posts ("joining Y Combinator" OR "we are joining YC" OR "part of YC")'
+      - 'site:linkedin.com/posts ("YC S26" OR "YC F26" OR "YC W27" OR "YC X27") (excited OR thrilled OR announce)'
+      - 'site:linkedin.com/posts ("a16z speedrun" OR "SR007" OR "SR008") (accepted OR joining OR backed OR "part of")'
+      - 'site:linkedin.com/posts ("backed by Y Combinator" OR "backed by a16z speedrun")'
+
+
+slack:
+  early_signal_channel: ""
+  confirmed_channel: ""
+
+classifier:
+  min_confidence: 0.7
+  model: "gemini-3.5-flash-lite"

@@ -1,0 +1,23 @@
+# Linting configuration for YC Radar.
+#
+# The default rule set is deliberately narrowed. Rules are disabled only
+# where they conflict with a documented design decision, never to hide a
+# real problem.
+
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+ignore = [
+    # Sources intentionally catch broad exceptions. A failing third-party
+    # API must degrade that one source, never stop the whole run, and the
+    # full set of failure modes cannot be enumerated in advance.
+    "BLE001",
+]
+
+[lint.per-file-ignores]
+# Diagnostic scripts import from the project root via sys.path, which
+# necessarily happens before the app imports.
+"scripts/*" = ["E402"]
