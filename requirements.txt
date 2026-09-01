@@ -6,4 +6,5 @@ APScheduler==3.10.4
 fastapi==0.115.5
 uvicorn==0.32.1
 google-genai==1.46.0
-beautifulsoup4==4.12.3pytest>=8.0
+beautifulsoup4==4.12.3
+pytest>=8.0

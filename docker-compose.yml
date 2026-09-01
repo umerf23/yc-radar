@@ -1,0 +1,51 @@
+services:
+  yc-radar:
+    build: .
+    image: yc-radar:latest
+    container_name: yc-radar
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      YC_RADAR_DB_PATH: /data/yc_radar.db
+      TZ: America/Los_Angeles
+
+    volumes:
+      - yc-radar-data:/data
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys
+          import urllib.request
+
+          try:
+              r = urllib.request.urlopen(
+                  "http://127.0.0.1:8000/health",
+                  timeout=5
+              )
+              sys.exit(0 if r.status == 200 else 1)
+          except Exception:
+              sys.exit(1)
+
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  yc-radar-data:

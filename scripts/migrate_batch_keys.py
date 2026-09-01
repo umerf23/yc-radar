@@ -8,6 +8,8 @@ the migration is re-runnable and reversible from the same source columns.
 import sqlite3
 import sys
 from pathlib import Path
+from app.config import load_config 
+DB_PATH = load_config().db_path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
