@@ -1,5 +1,5 @@
 poll_interval_hours: 8
-lookback_hours: 10
+lookback_hours: 24
 
 sources:
   yc_directory:
@@ -12,7 +12,7 @@ sources:
 
   x_twitter:
     enabled: true
-    max_results_per_query: 40
+    max_results_per_query: 20
 
     # Batch codes currently worth watching. YC runs four batches a year:
     # Winter, Spring (X), Summer, Fall. Update this list when a new batch
