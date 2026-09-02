@@ -104,7 +104,6 @@ def canonical_batch(raw: str) -> str:
         return f"yc{short.group(1)}{short.group(2)}"
 
     return ""
-
 @dataclass
 class Candidate:
     """A possible new YC or Speedrun company, from any source."""

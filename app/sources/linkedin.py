@@ -18,6 +18,7 @@ search-only when it is absent, so the bot runs fully without it.
 
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -30,7 +31,7 @@ REQUEST_TIMEOUT = 30
 APIFY_TIMEOUT = 180
 
 # Batch codes such as "S26", and Speedrun cohorts such as "SR007".
-BATCH_PATTERN = re.compile(r"\bYC\s*([WSXFP]\d{2})\b", re.IGNORECASE)
+BATCH_PATTERN = re.compile(r"\bYC\s*([WSXF]\d{2})\b", re.IGNORECASE)
 COHORT_PATTERN = re.compile(r"\bSR(\d{3})\b", re.IGNORECASE)
 
 # LinkedIn post URLs embed the author's public identifier:
@@ -96,9 +97,6 @@ ACCEPTANCE_MARKERS = (
     "a16z speedrun",
     "joining speedrun",
     "backed by a16z",
-  "a16z speedrun", 
-  "joining speedrun", 
-  "backed by a16z", 
 )
 
 
@@ -136,6 +134,7 @@ class LinkedInSource(Source):
         seen_links: set[str] = set()
         examined = 0
         filtered = 0
+        invalid_links = 0
 
         for query in queries:
             for item in self._search(query, limit):
@@ -146,6 +145,14 @@ class LinkedInSource(Source):
 
                 seen_links.add(link)
                 examined += 1
+
+                # Serper occasionally exposes an opaque Google result token
+                # instead of the destination URL. Such a token cannot produce
+                # the bounty-required original LinkedIn post link, so skip it
+                # rather than sending a broken Slack alert.
+                if not self._is_linkedin_url(link):
+                    invalid_links += 1
+                    continue
 
                 snippet = item.get("snippet", "")
                 title = item.get("title", "")
@@ -165,7 +172,9 @@ class LinkedInSource(Source):
 
         print(
             f"[{self.name}] examined {examined} results, "
-            f"prefilter dropped {filtered}, kept {len(candidates)}."
+            f"prefilter dropped {filtered}, "
+            f"invalid links {invalid_links}, "
+            f"kept {len(candidates)}."
         )
 
         return candidates
@@ -248,7 +257,7 @@ class LinkedInSource(Source):
             text = item.get("text") or item.get("content") or ""
             link = item.get("url") or item.get("postUrl") or ""
 
-            if not text or not link:
+            if not text or not self._is_linkedin_url(link):
                 continue
 
             if not self._looks_like_announcement(text, ""):
@@ -344,6 +353,19 @@ class LinkedInSource(Source):
                 "title": title,
             },
         )
+
+    def _is_linkedin_url(self, link: str) -> bool:
+        """Return True only for absolute HTTP(S) LinkedIn URLs."""
+        try:
+            parsed = urlparse(link)
+        except ValueError:
+            return False
+
+        if parsed.scheme not in {"http", "https"}:
+            return False
+
+        host = (parsed.hostname or "").lower()
+        return host == "linkedin.com" or host.endswith(".linkedin.com")
 
     def _author_name(self, title: str) -> str:
         """Pull a person's name from the search result title."""

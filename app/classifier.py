@@ -206,6 +206,7 @@ class Classifier:
         kept: list[Candidate] = []
         dropped = 0
         low_confidence = 0
+        missing_company = 0
 
         for candidate in candidates:
             # Official sources are already authoritative.
@@ -227,17 +228,27 @@ class Classifier:
                 low_confidence += 1
                 continue
 
-            kept.append(
-                self._apply_verdict(
-                    candidate,
-                    verdict,
-                    confidence,
-                )
+            classified = self._apply_verdict(
+                candidate,
+                verdict,
+                confidence,
             )
+
+            # The bounty requires an actionable company-level alert.
+            # Without a company name there is nothing deterministic to
+            # check against the official register, so do not promote the
+            # post to Slack as an early signal. The pipeline still records
+            # the candidate as seen, which prevents repeated classification.
+            if not classified.company_name:
+                missing_company += 1
+                continue
+
+            kept.append(classified)
 
         print(
             f"[classifier] dropped {dropped} non-announcements, "
             f"{low_confidence} below confidence, "
+            f"{missing_company} missing company, "
             f"kept {len(kept)}."
         )
 
@@ -338,7 +349,9 @@ class Classifier:
         """
 
         candidate.company_name = (
-            verdict.get("company_name") or ""
+            verdict.get("company_name")
+            or candidate.company_name
+            or ""
         ).strip()
 
         candidate.batch = (
@@ -360,8 +373,11 @@ class Classifier:
                 verdict.get("founder_name") or ""
             ).strip()
 
+        batch_lower = candidate.batch.lower()
+
         is_speedrun = (
-            "speedrun" in candidate.batch.lower()
+            "speedrun" in batch_lower
+            or bool(re.search(r"\bsr\d{1,3}\b", batch_lower))
         )
 
         if (
@@ -385,10 +401,8 @@ class Classifier:
             candidate.status = STATUS_EARLY_SIGNAL
             candidate.extra["already_listed"] = False
 
-        # A candidate with no extracted company name was never checked
-        # against the register, because there was nothing to look up.
-        # Calling that an early signal would assert something unverified,
-        # so the alert is flagged and the founder handle carries it.
+        # A company-less social post is filtered from the alert stream in
+        # classify_all. This flag remains useful for diagnostics and tests.
         candidate.extra["register_checked"] = bool(candidate.company_name)
 
         return candidate
