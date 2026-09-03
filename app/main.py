@@ -32,7 +32,7 @@ from app.pipeline import Pipeline
 from app.state import Store
 
 POND_PROTOCOL_VERSION = "1.0"
-POND_AGENT_VERSION = "1.1.0"
+POND_AGENT_VERSION = "1.1.1"
 
 # Shared state between the scheduler thread and the HTTP handlers.
 _last_run: dict[str, Any] = {}
@@ -187,6 +187,7 @@ def root() -> dict[str, str]:
         "health": "/health",
         "manifest": "/manifest",
         "runs": "/runs",
+        "tasks": "/tasks/{task_id}",
     }
 
 
@@ -224,6 +225,24 @@ def authenticate_pond(
             "unsupported_protocol_version",
             f"Protocol version {pond_version} is not supported.",
         )
+
+
+@app.get(
+    "/tasks/{task_id}",
+    dependencies=[Depends(authenticate_pond)],
+)
+def get_task(task_id: str) -> dict[str, Any]:
+    """Compatibility endpoint for Pond task validation.
+
+    YC Radar executes Pond runs synchronously and never creates
+    asynchronous tasks. The route exists so Pond can discover the
+    standard V1 task endpoint without advertising async task support.
+    """
+    fail(
+        404,
+        "task_not_found",
+        f"Task {task_id} does not exist because YC Radar executes synchronously.",
+    )
 
 
 def _request_payload(run: RunRequest) -> dict[str, Any]:
