@@ -1,23 +1,22 @@
 """
-Regression tests for the three pieces of logic the whole bot rests on.
+Regression tests for the core state and source-health behavior.
 
-These are deliberately narrow. They cover batch normalisation, dedup key
-stability, and the register lookup, because those are the parts where a
-silent mistake produces a confident wrong answer rather than a crash.
-
-The batch tests exist because of a real defect: the YC directory
-publishes 'Fall 2026' while founders write 'YC F26', and comparing those
-strings directly meant every already-listed company was reported as an
-early signal.
+These cover batch normalisation, deduplication, official-register lookup,
+failure-safe incremental windows, and X provider error classification.
 """
 
 import pytest
 
+from app.classifier import Classifier
 from app.models import (
+    STATUS_CONFIRMED_SPEEDRUN,
+    STATUS_CONFIRMED_YC,
     STATUS_EARLY_SIGNAL,
     Candidate,
     canonical_batch,
+    programme_from_batch,
 )
+from app.sources.x_twitter import BATCH_PATTERN, XTwitterSource
 from app.state import Store
 
 
@@ -69,6 +68,12 @@ def test_batch_variants_agree():
     founder_form = canonical_batch("YC F26")
 
     assert directory_form == founder_form
+
+
+def test_x_regex_rejects_invalid_p_batch():
+    """The X pre-parser must agree with canonical_batch."""
+    assert BATCH_PATTERN.search("We got into YC P26") is None
+    assert BATCH_PATTERN.search("We got into YC F26") is not None
 
 
 # ---------- deduplication ----------
@@ -176,3 +181,395 @@ def test_unrecognised_batch_falls_back_to_name_only(store):
     )
 
     assert store.is_officially_listed("Lightfield", "YC P26")
+
+
+# ---------- source run state ----------
+
+
+def test_failed_run_does_not_advance_last_success(store):
+    """
+    A provider failure must never become the next incremental cursor.
+    """
+    store.mark_run("x_twitter", 3)
+    successful = store.last_run("x_twitter")
+
+    assert successful is not None
+
+    store.mark_run(
+        "x_twitter",
+        0,
+        error="provider_credit_exhausted",
+    )
+
+    assert store.last_run("x_twitter") == successful
+
+    health = store.source_health()["x_twitter"]
+    assert health["status"] == "degraded"
+    assert health["error"] == "provider_credit_exhausted"
+    assert health["last_success_at"] == successful.isoformat()
+
+
+def test_first_failed_run_has_no_success_cursor(store):
+    store.mark_run(
+        "x_twitter",
+        0,
+        error="provider_auth_failed",
+    )
+
+    assert store.last_run("x_twitter") is None
+    health = store.source_health()["x_twitter"]
+    assert health["status"] == "degraded"
+    assert health["last_success_at"] is None
+
+
+# ---------- X provider errors ----------
+
+
+class _FakeResponse:
+    def __init__(self, status_code, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+
+def _bare_x_source():
+    """
+    Build only the attributes _request_with_retry needs.
+
+    This avoids coupling the provider-error unit tests to Source.__init__
+    configuration details.
+    """
+    source = object.__new__(XTwitterSource)
+    source._last_request_at = 0.0
+    source.last_error = None
+    return source
+
+
+def test_x_402_is_reported_as_credit_exhausted(monkeypatch):
+    source = _bare_x_source()
+
+    monkeypatch.setattr(
+        "app.sources.x_twitter.requests.get",
+        lambda *args, **kwargs: _FakeResponse(402),
+    )
+
+    result = source._request_with_retry({}, {}, "test query")
+
+    assert result is None
+    assert source.last_error == "provider_credit_exhausted"
+
+
+def test_x_401_is_reported_as_auth_failure(monkeypatch):
+    source = _bare_x_source()
+
+    monkeypatch.setattr(
+        "app.sources.x_twitter.requests.get",
+        lambda *args, **kwargs: _FakeResponse(401),
+    )
+
+    result = source._request_with_retry({}, {}, "test query")
+
+    assert result is None
+    assert source.last_error == "provider_auth_failed"
+
+
+def test_x_200_returns_payload(monkeypatch):
+    source = _bare_x_source()
+    payload = {"tweets": [{"id": "1"}]}
+
+    monkeypatch.setattr(
+        "app.sources.x_twitter.requests.get",
+        lambda *args, **kwargs: _FakeResponse(200, payload),
+    )
+
+    result = source._request_with_retry({}, {}, "test query")
+
+    assert result == payload
+    assert source.last_error is None
+
+
+def test_x_timeout_retries_then_succeeds(monkeypatch):
+    """A transient read timeout should not degrade the source."""
+    source = _bare_x_source()
+    payload = {"tweets": [{"id": "1"}]}
+    calls = {"count": 0}
+
+    def fake_get(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise __import__("requests").Timeout("timed out")
+        return _FakeResponse(200, payload)
+
+    monkeypatch.setattr(
+        "app.sources.x_twitter.requests.get",
+        fake_get,
+    )
+    monkeypatch.setattr(
+        "app.sources.x_twitter.time.sleep",
+        lambda _seconds: None,
+    )
+
+    result = source._request_with_retry({}, {}, "test query")
+
+    assert result == payload
+    assert calls["count"] == 2
+    assert source.last_error is None
+
+
+def test_x_timeout_exhaustion_is_reported(monkeypatch):
+    """Three consecutive timeouts should mark X degraded."""
+    source = _bare_x_source()
+    calls = {"count": 0}
+
+    def fake_get(*args, **kwargs):
+        calls["count"] += 1
+        raise __import__("requests").Timeout("timed out")
+
+    monkeypatch.setattr(
+        "app.sources.x_twitter.requests.get",
+        fake_get,
+    )
+    monkeypatch.setattr(
+        "app.sources.x_twitter.time.sleep",
+        lambda _seconds: None,
+    )
+
+    result = source._request_with_retry({}, {}, "test query")
+
+    assert result is None
+    assert calls["count"] == 3
+    assert source.last_error == "provider_timeout"
+
+
+# ---------- programme identification ----------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("YC F26", "yc"),
+        ("Fall 2026", "yc"),
+        ("Speedrun SR007", "speedrun"),
+        ("SR008", "speedrun"),
+        ("a16z Speedrun", "speedrun"),
+        ("YC P26", ""),
+        ("", ""),
+    ],
+)
+def test_programme_from_batch(raw, expected):
+    assert programme_from_batch(raw) == expected
+
+
+# ---------- official matching hardening ----------
+
+
+def test_generic_speedrun_matches_specific_official_cohort(store):
+    store.record_official(
+        "Acme AI",
+        "Speedrun SR007",
+        "https://example.com/acme",
+    )
+
+    match = store.official_match(
+        "Acme AI",
+        "Speedrun",
+        programme="speedrun",
+    )
+
+    assert match is not None
+    assert match["programme"] == "speedrun"
+    assert match["match_type"] == "programme_name"
+
+
+def test_specific_speedrun_wrong_cohort_does_not_match(store):
+    store.record_official(
+        "Acme AI",
+        "Speedrun SR007",
+        "https://example.com/acme",
+    )
+
+    assert (
+        store.official_match(
+            "Acme AI",
+            "Speedrun SR008",
+            programme="speedrun",
+        )
+        is None
+    )
+
+
+def test_generic_yc_matches_same_company_any_yc_batch(store):
+    store.record_official(
+        "Acme AI",
+        "Fall 2026",
+        "https://example.com/acme",
+    )
+
+    match = store.official_match(
+        "Acme AI",
+        "",
+        programme="yc",
+    )
+
+    assert match is not None
+    assert match["programme"] == "yc"
+
+
+# ---------- classifier evidence hardening ----------
+
+
+def _classifier_with_store(store):
+    classifier = object.__new__(Classifier)
+    classifier.store = store
+    return classifier
+
+
+def test_classifier_rejects_placeholder_company_name(store):
+    classifier = _classifier_with_store(store)
+    candidate = _candidate(
+        "",
+        post_text="Our company just got into YC F26.",
+        batch="YC F26",
+    )
+
+    result = classifier._apply_verdict(
+        candidate,
+        {
+            "company_name": "our company",
+            "batch": "YC F26",
+            "description": "",
+            "reason": "announcement",
+        },
+        0.95,
+    )
+
+    assert result.extra["validation_error"] == "invalid_company_name"
+    assert result.extra["register_checked"] is False
+
+
+def test_classifier_rejects_invalid_yc_batch_in_post(store):
+    classifier = _classifier_with_store(store)
+    candidate = _candidate(
+        "",
+        post_text="Acme AI just got into YC P26.",
+    )
+
+    result = classifier._apply_verdict(
+        candidate,
+        {
+            "company_name": "Acme AI",
+            "batch": "",
+            "description": "",
+            "reason": "announcement",
+        },
+        0.95,
+    )
+
+    assert result.extra["validation_error"] == "invalid_yc_batch"
+    assert result.extra["register_checked"] is False
+
+
+def test_classifier_requires_programme_evidence(store):
+    classifier = _classifier_with_store(store)
+    candidate = _candidate(
+        "",
+        post_text="Acme AI is launching today.",
+    )
+
+    result = classifier._apply_verdict(
+        candidate,
+        {
+            "company_name": "Acme AI",
+            "batch": "",
+            "description": "",
+            "reason": "announcement",
+        },
+        0.95,
+    )
+
+    assert result.extra["validation_error"] == "missing_programme_evidence"
+
+
+def test_classifier_confirms_official_yc_company(store):
+    store.record_official(
+        "Acme AI",
+        "Fall 2026",
+        "https://example.com/acme",
+    )
+
+    classifier = _classifier_with_store(store)
+    candidate = _candidate(
+        "",
+        post_text="Acme AI was accepted into YC F26.",
+        batch="YC F26",
+    )
+
+    result = classifier._apply_verdict(
+        candidate,
+        {
+            "company_name": "Acme AI",
+            "batch": "YC F26",
+            "description": "",
+            "reason": "announcement",
+        },
+        0.95,
+    )
+
+    assert result.status == STATUS_CONFIRMED_YC
+    assert result.extra["already_listed"] is True
+    assert result.extra["register_checked"] is True
+
+
+def test_classifier_marks_unlisted_valid_yc_as_early(store):
+    classifier = _classifier_with_store(store)
+    candidate = _candidate(
+        "",
+        post_text="Acme AI was accepted into YC F26.",
+        batch="YC F26",
+    )
+
+    result = classifier._apply_verdict(
+        candidate,
+        {
+            "company_name": "Acme AI",
+            "batch": "YC F26",
+            "description": "",
+            "reason": "announcement",
+        },
+        0.95,
+    )
+
+    assert result.status == STATUS_EARLY_SIGNAL
+    assert result.extra["already_listed"] is False
+    assert result.extra["register_checked"] is True
+
+
+def test_classifier_confirms_generic_speedrun_against_cohort(store):
+    store.record_official(
+        "Acme AI",
+        "Speedrun SR007",
+        "https://example.com/acme",
+    )
+
+    classifier = _classifier_with_store(store)
+    candidate = _candidate(
+        "",
+        post_text="Acme AI is joining a16z Speedrun.",
+        batch="",
+    )
+
+    result = classifier._apply_verdict(
+        candidate,
+        {
+            "company_name": "Acme AI",
+            "batch": "Speedrun",
+            "description": "",
+            "reason": "announcement",
+        },
+        0.95,
+    )
+
+    assert result.status == STATUS_CONFIRMED_SPEEDRUN
+    assert result.extra["already_listed"] is True

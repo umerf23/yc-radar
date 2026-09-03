@@ -17,7 +17,7 @@ from typing import Any
 
 # Alert statuses.
 # EARLY_SIGNAL is the one this project exists for:
-# a founder has announced but YC has not confirmed them yet.
+# a founder has announced but the relevant official register has not.
 STATUS_EARLY_SIGNAL = "EARLY_SIGNAL"
 STATUS_CONFIRMED_YC = "CONFIRMED_YC"
 STATUS_CONFIRMED_SPEEDRUN = "CONFIRMED_SPEEDRUN"
@@ -28,13 +28,15 @@ def _normalise(text: str) -> str:
     Reduce a company name to a comparable form for deduplication.
 
     Only legal suffixes are stripped. An earlier version also removed
-    tokens like 'ai', 'io' and 'app', which silently merged 118 distinct
-    YC companies into shared keys during directory seeding.
-
-    Those words are part of real company names now, so they stay.
+    tokens like 'ai', 'io' and 'app', which silently merged distinct
+    companies into shared keys. Those words are part of real company
+    names now, so they stay.
 
     Punctuation removal alone already handles the important case:
     'Acme AI' and 'acme.ai' both reduce to 'acmeai'.
+
+    IMPORTANT: this function deliberately remains stable because its
+    output is persisted in SQLite keys.
     """
     lowered = text.lower().strip()
 
@@ -52,6 +54,7 @@ def _normalise(text: str) -> str:
         "",
         lowered,
     )
+
 
 # YC batch letter codes. Spring is X because S was already taken by Summer.
 SEASON_TO_CODE = {
@@ -76,12 +79,10 @@ def canonical_batch(raw: str) -> str:
     Reduce any batch label to one comparable token.
 
     The YC directory publishes 'Fall 2026'. Founders write 'YC F26'.
-    a16z uses 'SR007', while its own pages sometimes say only 'Speedrun'.
-    Comparing those strings directly always fails, which silently turns
-    every already-listed company into a false early signal.
+    a16z uses 'SR007', while a social post may say only 'Speedrun'.
 
-    Returns an empty string when no batch can be identified. Callers must
-    treat that as 'unknown' rather than as a match.
+    Returns an empty string when no valid batch can be identified. Callers
+    must treat that as 'unknown' rather than as a guessed batch.
     """
     if not raw:
         return ""
@@ -104,6 +105,26 @@ def canonical_batch(raw: str) -> str:
         return f"yc{short.group(1)}{short.group(2)}"
 
     return ""
+
+
+def programme_from_batch(raw: str) -> str:
+    """
+    Return the programme implied by a recognised batch label.
+
+    Results are 'yc', 'speedrun', or an empty string when the label is
+    missing/unrecognisable.
+    """
+    batch = canonical_batch(raw)
+
+    if batch.startswith("yc"):
+        return "yc"
+
+    if batch == "speedrun" or batch.startswith("sr"):
+        return "speedrun"
+
+    return ""
+
+
 @dataclass
 class Candidate:
     """A possible new YC or Speedrun company, from any source."""
@@ -116,10 +137,10 @@ class Candidate:
     # One of the STATUS_ constants.
 
     url: str = ""
-    # Link to the post or YC profile.
+    # Link to the post or official profile.
 
     batch: str = ""
-    # e.g. "Summer 2026", "Speedrun"
+    # e.g. "Summer 2026", "YC F26", "Speedrun SR007"
 
     founder_name: str = ""
 
@@ -147,7 +168,7 @@ class Candidate:
         Stable identity for this company across sources and runs.
 
         Keyed on the normalised company name rather than the URL, so the
-        same company found first on X and later in the YC directory is
+        same company found first on X and later in the official directory is
         recognised as one thing rather than two alerts.
         """
         basis = _normalise(self.company_name)

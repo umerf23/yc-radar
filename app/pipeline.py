@@ -35,12 +35,12 @@ class Pipeline:
         Execute one cycle and return a summary of what happened.
 
         The returned dict feeds the health endpoint, so a monitoring
-        system can tell a healthy quiet run from a broken one.
+        system can tell a healthy quiet run from a degraded or broken one.
         """
         started = datetime.now(UTC)
         print(f"\n=== run started {started.isoformat()} ===")
 
-        collected = self._collect()
+        collected, source_status = self._collect()
         fresh = self.store.filter_new(collected)
         print(f"[pipeline] {len(collected)} collected, {len(fresh)} new.")
 
@@ -70,6 +70,22 @@ class Pipeline:
                 alerted=id(candidate) in delivered_ids,
             )
 
+        succeeded = [
+            name
+            for name, result in source_status.items()
+            if result["status"] == "ok"
+        ]
+        degraded = [
+            name
+            for name, result in source_status.items()
+            if result["status"] == "degraded"
+        ]
+        failed = [
+            name
+            for name, result in source_status.items()
+            if result["status"] in {"failed", "skipped"}
+        ]
+
         summary = {
             "started_at": started.isoformat(),
             "finished_at": datetime.now(UTC).isoformat(),
@@ -80,36 +96,97 @@ class Pipeline:
             "early_signals": sum(
                 1 for item in delivered if item.is_early_signal
             ),
-            "sources_run": [source.name for source in self.sources],
+            # Backward-compatible field: now means sources that completed
+            # successfully, rather than merely configured sources.
+            "sources_run": succeeded,
+            "sources_attempted": [
+                name
+                for name, result in source_status.items()
+                if result["status"] != "skipped"
+            ],
+            "sources_degraded": degraded,
+            "sources_failed": failed,
+            "source_status": source_status,
         }
 
         if send_summary and not delivered:
             self.notifier.send_run_summary(summary)
 
-        print(f"[pipeline] done: {summary['alerted']} alerts sent.")
+        print(
+            f"[pipeline] done: {summary['alerted']} alerts sent; "
+            f"{len(succeeded)} sources ok, "
+            f"{len(degraded)} degraded, {len(failed)} failed/skipped."
+        )
         return summary
 
-    def _collect(self) -> list[Candidate]:
+    def _collect(
+        self,
+    ) -> tuple[list[Candidate], dict[str, dict[str, Any]]]:
         """
-        Gather from every source, isolating failures.
+        Gather from every source while isolating failures.
 
-        A source that raises is logged against its own name and the run
-        continues. Losing one platform for one cycle is acceptable;
-        losing the whole run is not.
+        A source can complete successfully, complete in a degraded state
+        with partial results, fail with an exception, or be skipped because
+        it is not configured. One unhealthy platform never stops the others.
         """
         collected: list[Candidate] = []
+        source_status: dict[str, dict[str, Any]] = {}
 
         for source in self.sources:
-            try:
-                found = source.collect()
-                collected.extend(found)
-                self.store.mark_run(source.name, len(found))
-            except Exception as error:
-                print(f"[pipeline] source '{source.name}' failed: {error}")
+            availability = getattr(source, "is_available", None)
+
+            if callable(availability) and not availability():
+                error = "not_configured"
+                print(f"[pipeline] source '{source.name}' skipped: {error}")
                 self.store.mark_run(
                     source.name,
                     0,
-                    error=str(error),
+                    error=error,
                 )
+                source_status[source.name] = {
+                    "status": "skipped",
+                    "items_found": 0,
+                    "error": error,
+                }
+                continue
 
-        return collected
+            try:
+                found = source.collect()
+                collected.extend(found)
+
+                source_error = getattr(source, "last_error", None)
+
+                if source_error:
+                    self.store.mark_run(
+                        source.name,
+                        len(found),
+                        error=str(source_error),
+                    )
+                    source_status[source.name] = {
+                        "status": "degraded",
+                        "items_found": len(found),
+                        "error": str(source_error),
+                    }
+                else:
+                    self.store.mark_run(source.name, len(found))
+                    source_status[source.name] = {
+                        "status": "ok",
+                        "items_found": len(found),
+                        "error": None,
+                    }
+
+            except Exception as error:
+                message = str(error)
+                print(f"[pipeline] source '{source.name}' failed: {message}")
+                self.store.mark_run(
+                    source.name,
+                    0,
+                    error=message,
+                )
+                source_status[source.name] = {
+                    "status": "failed",
+                    "items_found": 0,
+                    "error": message,
+                }
+
+        return collected, source_status

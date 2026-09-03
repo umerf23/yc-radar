@@ -10,20 +10,18 @@ Three design points worth understanding:
 1. Search operators. X disabled the classic 'since:' and 'until:'
    operators, so incremental windowing uses 'since_time:' with a Unix
    timestamp instead. The window start comes from the state layer, which
-   means a delayed or failed run widens the window rather than creating
-   a blind spot.
+   now advances only after a successful source run.
 
 2. The display-name signal. Founders who are already publicly announced
    put their batch in their handle, as in "Conifer (YC S26)". Their posts
    are product updates, not acceptance news. Filtering on this one
-   pattern removes the large majority of the noise, because established
-   batch companies tweet far more often than newly accepted ones.
+   pattern removes the large majority of the noise.
 
 3. Division of labour. This module does not decide whether a post is a
    real announcement. It narrows the field cheaply, then hands survivors
-   to the classifier. Company name extraction is left to the classifier,
-   because a regex cannot reliably tell a company name from a product
-   name in free text.
+   to the classifier. Provider errors are exposed through last_error so
+   the pipeline can report a degraded source instead of pretending a
+   failed API request was a healthy zero-result run.
 """
 
 import re
@@ -42,18 +40,15 @@ REQUEST_TIMEOUT = 30
 MAX_PAGES = 3
 
 # TwitterAPI.io enforces a per-second request cap. Requests are spaced
-# rather than fired in a tight loop, and 429 responses back off and retry
-# instead of dropping the query entirely. Four seconds was the value that
-# stopped triggering limits in testing; lower it if your tier allows.
+# rather than fired in a tight loop, and 429 responses back off and retry.
 MIN_SECONDS_BETWEEN_REQUESTS = 8
 
 MAX_RETRIES = 3
 BACKOFF_SECONDS = 5
 
-
-# Batch codes such as "S26" or "W27", and Speedrun cohorts such as "SR007".
+# Valid YC batch letters are W, S, X and F. "P" is deliberately excluded.
 BATCH_PATTERN = re.compile(
-    r"\bYC\s*([WSXFP]\d{2})\b",
+    r"\bYC\s*([WSXF]\d{2})\b",
     re.IGNORECASE,
 )
 
@@ -62,14 +57,12 @@ COHORT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-
 # A batch label in the author's display name means the company is already
 # publicly associated with the programme, so this is not an early signal.
 ANNOUNCED_IN_NAME = re.compile(
-    r"\((?:YC|Y Combinator)\s*[WSXFP]?\d{2}\)|\bSR\d{3}\b",
+    r"\((?:YC|Y Combinator)\s*[WSXF]?\d{2}\)|\bSR\d{3}\b",
     re.IGNORECASE,
 )
-
 
 # Phrases that mean the post is not a first-time acceptance announcement.
 NOISE_MARKERS = (
@@ -93,7 +86,6 @@ NOISE_MARKERS = (
     "questions for anyone",
     "what was the interview",
 )
-
 
 # Language that marks a post as an acceptance announcement rather than a
 # product update from a company announced long ago.
@@ -125,11 +117,16 @@ class XTwitterSource(Source):
         # Monotonic clock, so pacing is unaffected by system time changes.
         self._last_request_at = 0.0
 
+        # Public diagnostic consumed by Pipeline._collect().
+        self.last_error: str | None = None
+
     def is_available(self) -> bool:
         """Without an API key this source is skipped, not failed."""
         return bool(self.config.twitterapi_key)
 
     def collect(self) -> list[Candidate]:
+        self.last_error = None
+
         if not self.is_available():
             print(f"[{self.name}] no TWITTERAPI_KEY set, skipping.")
             return []
@@ -154,7 +151,9 @@ class XTwitterSource(Source):
         filtered = 0
 
         for query in queries:
-            for tweet in self._search(query, since, limit):
+            tweets = self._search(query, since, limit)
+
+            for tweet in tweets:
                 tweet_id = str(tweet.get("id", ""))
 
                 if not tweet_id or tweet_id in seen_ids:
@@ -180,10 +179,21 @@ class XTwitterSource(Source):
                 if candidate:
                     candidates.append(candidate)
 
+            # Auth, credit, provider or exhausted-rate-limit failures are
+            # source-level problems. Keep any partial results already found,
+            # but do not waste calls on the remaining queries this cycle.
+            if self.last_error:
+                break
+
         print(
             f"[{self.name}] examined {examined} posts, "
             f"prefilter dropped {filtered}, "
-            f"kept {len(candidates)}."
+            f"kept {len(candidates)}"
+            + (
+                f", degraded: {self.last_error}."
+                if self.last_error
+                else "."
+            )
         )
 
         return candidates
@@ -199,12 +209,12 @@ class XTwitterSource(Source):
         """
         Run one paginated search, respecting the provider's rate limit.
 
-        Requests are spaced by MIN_SECONDS_BETWEEN_REQUESTS, and a 429
-        triggers an exponential backoff rather than abandoning the query.
-        Losing a query to a transient limit means losing signal for that
-        whole 8 hour window, so retrying is worth the wait.
+        Requests are spaced by MIN_SECONDS_BETWEEN_REQUESTS. Transient
+        timeouts, connection failures and 429 responses are retried. If
+        retries are exhausted or the provider rejects
+        auth/credits, last_error is set so the pipeline can mark this source
+        degraded without stopping YC, Speedrun or LinkedIn.
         """
-
         collected: list[dict[str, Any]] = []
         cursor = ""
 
@@ -257,12 +267,11 @@ class XTwitterSource(Source):
         query_label: str,
     ) -> dict[str, Any] | None:
         """
-        One API call with pacing and 429 backoff.
+        Make one provider call with pacing and bounded retries.
 
-        Returns the parsed body, or None when the call could not be
-        completed. Never raises: a failed query must not stop the run.
+        Errors are converted into stable diagnostic codes rather than being
+        silently treated as legitimate zero-result searches.
         """
-
         for attempt in range(MAX_RETRIES):
             self._wait_for_slot()
 
@@ -273,41 +282,105 @@ class XTwitterSource(Source):
                     params=params,
                     timeout=REQUEST_TIMEOUT,
                 )
+            except requests.Timeout as error:
+                wait = BACKOFF_SECONDS * (attempt + 1)
+                print(
+                    f"[{self.name}] request timed out on "
+                    f"'{query_label[:40]}', "
+                    f"retrying in {wait}s..."
+                )
+
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(wait)
+                    continue
+
+                self.last_error = "provider_timeout"
+                print(
+                    f"[{self.name}] timeout persisted after "
+                    f"{MAX_RETRIES} attempts: {error}"
+                )
+                break
+
+            except requests.ConnectionError as error:
+                wait = BACKOFF_SECONDS * (attempt + 1)
+                print(
+                    f"[{self.name}] connection error on "
+                    f"'{query_label[:40]}', "
+                    f"retrying in {wait}s..."
+                )
+
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(wait)
+                    continue
+
+                self.last_error = "provider_connection_error"
+                print(
+                    f"[{self.name}] connection failed after "
+                    f"{MAX_RETRIES} attempts: {error}"
+                )
+                break
 
             except requests.RequestException as error:
+                self.last_error = "provider_request_error"
                 print(
                     f"[{self.name}] request error on "
                     f"'{query_label[:40]}': {error}"
                 )
                 return None
 
-            if response.status_code == 429:
-                wait = BACKOFF_SECONDS * (attempt + 1)
+            status = response.status_code
 
+            if status == 200:
+                try:
+                    return response.json()
+                except ValueError:
+                    self.last_error = "provider_invalid_response"
+                    print(
+                        f"[{self.name}] could not parse response body."
+                    )
+                    return None
+
+            if status == 429:
+                wait = BACKOFF_SECONDS * (attempt + 1)
                 print(
                     f"[{self.name}] rate limited, "
                     f"waiting {wait}s..."
                 )
 
-                time.sleep(wait)
-                continue
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(wait)
+                    continue
 
-            if response.status_code != 200:
+                self.last_error = "provider_rate_limited"
+                break
+
+            if status in {500, 502, 503, 504}:
+                wait = BACKOFF_SECONDS * (attempt + 1)
                 print(
-                    f"[{self.name}] HTTP {response.status_code} "
-                    f"on '{query_label[:40]}'"
+                    f"[{self.name}] provider HTTP {status}, "
+                    f"retrying in {wait}s..."
                 )
-                return None
 
-            try:
-                return response.json()
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(wait)
+                    continue
 
-            except ValueError:
-                print(
-                    f"[{self.name}] "
-                    "could not parse response body."
-                )
-                return None
+                self.last_error = f"provider_server_error_{status}"
+                break
+
+            if status in {401, 403}:
+                self.last_error = "provider_auth_failed"
+            elif status == 402:
+                self.last_error = "provider_credit_exhausted"
+            else:
+                self.last_error = f"provider_http_{status}"
+
+            print(
+                f"[{self.name}] HTTP {status} "
+                f"on '{query_label[:40]}' "
+                f"({self.last_error})"
+            )
+            return None
 
         print(
             f"[{self.name}] gave up after {MAX_RETRIES} attempts "
@@ -318,11 +391,7 @@ class XTwitterSource(Source):
 
     def _wait_for_slot(self) -> None:
         """Space consecutive requests to stay under the provider's limit."""
-
-        elapsed = (
-            time.monotonic() -
-            self._last_request_at
-        )
+        elapsed = time.monotonic() - self._last_request_at
 
         if elapsed < MIN_SECONDS_BETWEEN_REQUESTS:
             time.sleep(
@@ -350,11 +419,9 @@ class XTwitterSource(Source):
 
           3. What remains must contain explicit acceptance language.
 
-        Gate three is the strict one. Requiring it costs some recall on
-        creatively worded posts, but the alternative, measured in testing,
-        was 48 kept posts of which roughly one was a real signal.
+        Gate three is deliberately strict. Requiring it costs some recall on
+        creatively worded posts, but sharply reduces false-positive LLM calls.
         """
-
         if not text:
             return False
 
@@ -386,7 +453,6 @@ class XTwitterSource(Source):
         from the post text, and Candidate.dedup_key falls back to the URL
         when no name is present, so deduplication still works meanwhile.
         """
-
         author = tweet.get("author", {}) or {}
         handle = author.get("userName", "")
 
@@ -423,7 +489,6 @@ class XTwitterSource(Source):
 
     def _extract_batch(self, text: str) -> str:
         """Pull a batch or cohort label from the post, if one is stated."""
-
         batch_match = BATCH_PATTERN.search(text)
 
         if batch_match:
@@ -432,8 +497,6 @@ class XTwitterSource(Source):
         cohort_match = COHORT_PATTERN.search(text)
 
         if cohort_match:
-            return (
-                f"Speedrun SR{cohort_match.group(1)}"
-            )
+            return f"Speedrun SR{cohort_match.group(1)}"
 
         return ""

@@ -1,19 +1,14 @@
 """
 Early-signal classifier.
 
-This is where noisy search results become defensible alerts. The module
-answers one question about each post: is this person announcing that
-their own company was accepted into YC or Speedrun?
+This is where noisy search results become defensible alerts. The model has
+one narrow job: decide whether the author is announcing that their own
+company was accepted into YC or a16z Speedrun, and extract the stated facts.
 
-Note what it does NOT decide. Whether a signal is 'early' is not a
-judgement call, it is a database lookup: the LLM extracts the company
-name, and the official register decides whether YC has published it yet.
-Keeping the fallible part narrow and the verifiable part deterministic
-is the whole point of the split.
-
-Providers are pluggable. Gemini is the default because its free tier is
-generous, but the interface is small enough that adding another provider
-means writing one class.
+The model does NOT decide whether a signal is early. That decision is made
+deterministically from programme evidence plus the persisted official
+register. This keeps the fallible extraction step separate from the claim
+that a company beat an official announcement.
 """
 
 import json
@@ -26,12 +21,48 @@ from app.models import (
     STATUS_CONFIRMED_YC,
     STATUS_EARLY_SIGNAL,
     Candidate,
+    canonical_batch,
+    programme_from_batch,
 )
 
 # Gemini's free tier permits a limited number of requests per minute, so
 # calls are paced rather than fired in a loop. Lower this on a paid tier.
 MAX_RETRIES = 3
 RATE_LIMIT_BACKOFF = 15
+
+# Deterministic evidence checks performed after the LLM verdict.
+YC_PROGRAMME = re.compile(
+    r"\b(?:y\s*combinator|ycombinator|yc)\b",
+    re.IGNORECASE,
+)
+
+SPEEDRUN_PROGRAMME = re.compile(
+    r"\b(?:a16z\s+speedrun|speedrun|sr[\s\-_]?\d{1,3})\b",
+    re.IGNORECASE,
+)
+
+YC_BATCH_MENTION = re.compile(
+    r"\bYC\s*([A-Z])\s*'?\s*(\d{2})\b",
+    re.IGNORECASE,
+)
+
+VALID_YC_BATCH_LETTERS = {"W", "X", "S", "F"}
+
+GENERIC_COMPANY_NAMES = {
+    "company",
+    "ourcompany",
+    "mystartup",
+    "ourstartup",
+    "startup",
+    "stealth",
+    "stealthstartup",
+    "unknown",
+    "unnamed",
+    "na",
+    "none",
+    "notstated",
+    "notstatedinpost",
+}
 
 
 # Kept deliberately terse. Long prompts invite the model to editorialise,
@@ -45,7 +76,7 @@ Answer with JSON only. No markdown, no code fences, no commentary.
 
 {
   "is_announcement": true or false,
-  "company_name": "the company being announced, or empty string",
+  "company_name": "the company explicitly named in the post, or empty string",
   "batch": "e.g. 'YC S26', 'Speedrun SR007', or empty string",
   "founder_name": "the author's name if stated, else empty string",
   "description": "one short sentence on what the company does, else empty",
@@ -71,12 +102,14 @@ Set is_announcement to TRUE only when the author is clearly stating that
 they, or their company, have just been accepted or backed.
 
 Valid YC batch codes are W, X, S or F followed by two digits, for
-example "YC S26" or "YC F26". X means Spring. If a post names a
-batch that does not fit this pattern, return an empty string for
-batch rather than repeating what the post said.
+example "YC S26" or "YC F26". X means Spring. If a post names a batch
+that does not fit this pattern, return an empty string for batch rather
+than repeating what the post said.
 
-Never invent a company name. If the post does not state one, return an
-empty string for company_name.
+Never invent a company name. company_name must be stated in the supplied
+post text. Do not infer it from outside knowledge, the author's profile,
+or a likely employer. If the post does not state one, return an empty
+string for company_name.
 
 For founder_name, use the person who wrote the post, not other people
 mentioned in it.
@@ -154,7 +187,6 @@ class Classifier:
         keyword-only mode rather than failing. The bot stays useful with
         no LLM credentials, just less precise.
         """
-
         if not self.config.classifier_enabled:
             print(
                 "[classifier] no LLM configured, "
@@ -199,14 +231,14 @@ class Classifier:
         """
         Classify social candidates and return those worth alerting on.
 
-        Candidates from official sources pass through untouched: the YC
-        directory does not need an LLM to confirm what it published.
+        Candidates from official sources pass through untouched: the
+        official directory does not need an LLM to confirm what it published.
         """
-
         kept: list[Candidate] = []
         dropped = 0
         low_confidence = 0
         missing_company = 0
+        invalid_evidence = 0
 
         for candidate in candidates:
             # Official sources are already authoritative.
@@ -235,12 +267,14 @@ class Classifier:
             )
 
             # The bounty requires an actionable company-level alert.
-            # Without a company name there is nothing deterministic to
-            # check against the official register, so do not promote the
-            # post to Slack as an early signal. The pipeline still records
-            # the candidate as seen, which prevents repeated classification.
             if not classified.company_name:
                 missing_company += 1
+                continue
+
+            # The LLM verdict is necessary but not sufficient. Programme
+            # evidence and batch validity are checked deterministically.
+            if classified.extra.get("validation_error"):
+                invalid_evidence += 1
                 continue
 
             kept.append(classified)
@@ -249,6 +283,7 @@ class Classifier:
             f"[classifier] dropped {dropped} non-announcements, "
             f"{low_confidence} below confidence, "
             f"{missing_company} missing company, "
+            f"{invalid_evidence} invalid evidence, "
             f"kept {len(kept)}."
         )
 
@@ -267,7 +302,6 @@ class Classifier:
         model does not exist for this key, which no amount of waiting
         fixes, so it fails fast instead.
         """
-
         if self._provider is None:
             return self._keyword_verdict(candidate)
 
@@ -324,7 +358,6 @@ class Classifier:
 
     def _wait_for_slot(self) -> None:
         """Space calls to stay inside the provider's per-minute quota."""
-
         elapsed = time.monotonic() - self._last_call_at
 
         if elapsed < self._min_seconds:
@@ -341,12 +374,16 @@ class Classifier:
         confidence: float,
     ) -> Candidate:
         """
-        Fill in the extracted fields and set the final status.
+        Fill extracted fields, validate evidence, and set the final status.
 
-        The early-versus-confirmed decision is made here, by lookup, not
-        by the model. If the register already holds this company then the
-        founder did not beat YC to it, and the alert says so.
+        EARLY_SIGNAL is assigned only after:
+          1. a usable company name exists,
+          2. the post contains deterministic YC/Speedrun evidence,
+          3. any YC batch code in the post is valid, and
+          4. the programme-specific official register has been checked.
         """
+        source_batch = candidate.batch
+        verdict_batch = str(verdict.get("batch") or "").strip()
 
         candidate.company_name = (
             verdict.get("company_name")
@@ -354,9 +391,14 @@ class Classifier:
             or ""
         ).strip()
 
-        candidate.batch = (
-            verdict.get("batch") or candidate.batch
-        ).strip()
+        # Never let an invalid model-produced batch overwrite a valid batch
+        # already extracted by the source.
+        if canonical_batch(verdict_batch):
+            candidate.batch = verdict_batch
+        elif canonical_batch(source_batch):
+            candidate.batch = source_batch
+        else:
+            candidate.batch = ""
 
         candidate.description = (
             verdict.get("description") or ""
@@ -367,45 +409,159 @@ class Classifier:
         candidate.extra["classifier_reason"] = (
             verdict.get("reason", "")
         )
+        candidate.extra["canonical_batch"] = canonical_batch(
+            candidate.batch
+        )
 
         if not candidate.founder_name:
             candidate.founder_name = (
                 verdict.get("founder_name") or ""
             ).strip()
 
-        batch_lower = candidate.batch.lower()
+        candidate.extra.pop("validation_error", None)
 
-        is_speedrun = (
-            "speedrun" in batch_lower
-            or bool(re.search(r"\bsr\d{1,3}\b", batch_lower))
+        if not candidate.company_name:
+            candidate.extra["register_checked"] = False
+            return candidate
+
+        validation_error, programme = self._validate_evidence(candidate)
+
+        if validation_error:
+            candidate.extra["validation_error"] = validation_error
+            candidate.extra["register_checked"] = False
+            candidate.extra["programme"] = programme
+            return candidate
+
+        candidate.extra["programme"] = programme
+
+        official_match = self._official_match(
+            candidate.company_name,
+            candidate.batch,
+            programme,
         )
 
-        if (
-            candidate.company_name
-            and self.store.is_officially_listed(
-                candidate.company_name,
-                candidate.batch,
+        candidate.extra["register_checked"] = True
+
+        if official_match:
+            official_programme = (
+                official_match.get("programme")
+                or programme
             )
-        ):
-            # Already published, so this is confirmation rather than
-            # a scoop.
+
             candidate.status = (
                 STATUS_CONFIRMED_SPEEDRUN
-                if is_speedrun
+                if official_programme == "speedrun"
                 else STATUS_CONFIRMED_YC
             )
 
             candidate.extra["already_listed"] = True
+            candidate.extra["official_match"] = {
+                "company_name": official_match.get("company_name", ""),
+                "batch": official_match.get("batch", ""),
+                "profile_url": official_match.get("profile_url", ""),
+                "programme": official_programme,
+                "match_type": official_match.get("match_type", "exact"),
+            }
 
         else:
             candidate.status = STATUS_EARLY_SIGNAL
             candidate.extra["already_listed"] = False
-
-        # A company-less social post is filtered from the alert stream in
-        # classify_all. This flag remains useful for diagnostics and tests.
-        candidate.extra["register_checked"] = bool(candidate.company_name)
+            candidate.extra.pop("official_match", None)
 
         return candidate
+
+    # ---------- deterministic validation ----------
+
+    def _validate_evidence(
+        self,
+        candidate: Candidate,
+    ) -> tuple[str, str]:
+        """
+        Return (error_code, programme).
+
+        An empty error code means the social post has enough deterministic
+        evidence to support an early/confirmed classification.
+        """
+        if not self._usable_company_name(candidate.company_name):
+            return "invalid_company_name", ""
+
+        text = candidate.post_text or ""
+
+        invalid_code = YC_BATCH_MENTION.search(text)
+        if (
+            invalid_code
+            and invalid_code.group(1).upper()
+            not in VALID_YC_BATCH_LETTERS
+        ):
+            return "invalid_yc_batch", "yc"
+
+        programmes: set[str] = set()
+
+        batch_programme = programme_from_batch(candidate.batch)
+        if batch_programme:
+            programmes.add(batch_programme)
+
+        if YC_PROGRAMME.search(text):
+            programmes.add("yc")
+
+        if SPEEDRUN_PROGRAMME.search(text):
+            programmes.add("speedrun")
+
+        if not programmes:
+            return "missing_programme_evidence", ""
+
+        if len(programmes) > 1:
+            return "programme_conflict", ""
+
+        return "", next(iter(programmes))
+
+    def _usable_company_name(self, company_name: str) -> bool:
+        """Reject placeholders that cannot support a company-level alert."""
+        compact = re.sub(
+            r"[^a-z0-9]",
+            "",
+            (company_name or "").lower(),
+        )
+
+        return (
+            len(compact) >= 2
+            and compact not in GENERIC_COMPANY_NAMES
+        )
+
+    def _official_match(
+        self,
+        company_name: str,
+        batch: str,
+        programme: str,
+    ) -> dict[str, Any] | None:
+        """
+        Query the richer register API when available.
+
+        The compatibility fallback keeps Classifier usable with older stores
+        and simple test doubles.
+        """
+        match_method = getattr(self.store, "official_match", None)
+
+        if callable(match_method):
+            return match_method(
+                company_name,
+                batch,
+                programme=programme,
+            )
+
+        if self.store.is_officially_listed(
+            company_name,
+            batch,
+        ):
+            return {
+                "company_name": company_name,
+                "batch": batch,
+                "profile_url": "",
+                "programme": programme,
+                "match_type": "legacy_boolean",
+            }
+
+        return None
 
     # ---------- helpers ----------
 
@@ -420,7 +576,6 @@ class Classifier:
         occasionally wrap output in code fences anyway, so strip those
         before parsing rather than failing the whole candidate.
         """
-
         text = raw.strip()
 
         text = re.sub(
@@ -460,7 +615,6 @@ class Classifier:
         reports low confidence and most candidates will fall below the
         threshold. The bot degrades to near-silence rather than to noise.
         """
-
         return {
             "is_announcement": True,
             "company_name": candidate.company_name,
