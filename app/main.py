@@ -211,7 +211,7 @@ def authenticate_pond(
     expected = f"Bearer {access_key}"
     if authorization is None or not secrets.compare_digest(authorization, expected):
         fail(401, "unauthorized", "The Access Key is missing or invalid.")
-
+    print(f"[pond] protocol header received: {pond_version!r}")
     raw_version = (pond_version or "").strip()
 
     # Some HTTP intermediaries may fold repeated identical headers into
