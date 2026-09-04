@@ -192,6 +192,7 @@ def root() -> dict[str, str]:
 
 
 def authenticate_pond(
+    request: Request,
     authorization: str | None = Header(default=None),
     pond_version: str | None = Header(
         default=None,
@@ -212,7 +213,20 @@ def authenticate_pond(
     if authorization is None or not secrets.compare_digest(authorization, expected):
         fail(401, "unauthorized", "The Access Key is missing or invalid.")
 
-    raw_version = (pond_version or "").strip()
+    # Prefer FastAPI's parsed header value, then read directly from the
+    # ASGI request headers as a compatibility fallback.
+    raw_version = (
+        pond_version
+        or request.headers.get("x-agent-protocol-version")
+        or ""
+    ).strip()
+
+    # On the current Railway deployment this custom header is removed before
+    # it reaches the app even though the client sends it. The Bearer access
+    # key remains mandatory, so authenticated requests safely default to the
+    # only protocol version this agent advertises and supports.
+    if not raw_version:
+        raw_version = POND_PROTOCOL_VERSION
 
     # Some HTTP intermediaries may fold repeated identical headers into
     # a comma-separated value, e.g. "1.0, 1.0".
@@ -229,7 +243,7 @@ def authenticate_pond(
         fail(
             400,
             "invalid_request",
-            f"The protocol version must be Major.Minor. Received: {raw_version!r}",
+            "The protocol version must be Major.Minor.",
         )
 
     if any(
