@@ -12,10 +12,12 @@ from app.models import (
     STATUS_CONFIRMED_SPEEDRUN,
     STATUS_CONFIRMED_YC,
     STATUS_EARLY_SIGNAL,
+    STATUS_LINKEDIN_COMPANY_SIGNAL,
     Candidate,
     canonical_batch,
     programme_from_batch,
 )
+from app.sources.linkedin import LinkedInSource
 from app.sources.x_twitter import BATCH_PATTERN, XTwitterSource
 from app.state import Store
 
@@ -650,3 +652,112 @@ def test_classifier_confirms_company_known_before_cycle(store):
     assert result.extra["register_checked"] is True
     assert result.extra["official_seen_same_cycle"] is False
     assert result.extra["official_match"]["recorded_at"]
+
+# ---------- LinkedIn company-page detection ----------
+
+
+def _bare_linkedin_source():
+    """Construct helper-only LinkedInSource without external credentials."""
+    return object.__new__(LinkedInSource)
+
+
+def test_linkedin_company_url_normalizes_subpages_and_querystrings():
+    source = _bare_linkedin_source()
+
+    assert (
+        source._canonical_company_url(
+            "https://www.linkedin.com/company/acme-ai/about/?trk=foo"
+        )
+        == "https://www.linkedin.com/company/acme-ai/"
+    )
+
+
+def test_linkedin_company_url_rejects_posts_and_people():
+    source = _bare_linkedin_source()
+
+    assert source._canonical_company_url(
+        "https://www.linkedin.com/posts/jane_example-activity-1"
+    ) == ""
+    assert source._canonical_company_url(
+        "https://www.linkedin.com/in/jane-doe/"
+    ) == ""
+
+
+def test_linkedin_company_page_requires_direct_programme_evidence():
+    source = _bare_linkedin_source()
+
+    assert source._looks_like_company_page(
+        "Acme AI (YC F26) | LinkedIn",
+        "Acme AI builds developer tools.",
+        "Acme AI",
+    )
+    assert source._looks_like_company_page(
+        "Acme AI | LinkedIn",
+        "Founder & CEO of Acme AI (YC F26).",
+        "Acme AI",
+    )
+    assert source._looks_like_company_page(
+        "Acme AI | LinkedIn",
+        "Acme AI is backed by a16z Speedrun.",
+        "Acme AI",
+    )
+
+
+def test_linkedin_company_page_rejects_related_company_noise():
+    source = _bare_linkedin_source()
+
+    assert not source._looks_like_company_page(
+        "SoloTech Solutions, Inc. | LinkedIn",
+        "Chromie (YC S26) is partnering with SoloTech Solutions, Inc.",
+        "SoloTech Solutions, Inc.",
+    )
+    assert not source._looks_like_company_page(
+        "Hyper | LinkedIn",
+        "Callbook AI (YC S26). Technology, Information and Internet.",
+        "Hyper",
+    )
+    assert not source._looks_like_company_page(
+        "Synthrun | LinkedIn",
+        "Today I got a notification from a16z Speedrun.",
+        "Synthrun",
+    )
+
+
+def test_linkedin_company_page_rejects_invalid_yc_batch():
+    source = _bare_linkedin_source()
+
+    assert not source._looks_like_company_page(
+        "Huscarl (YC P26) | LinkedIn",
+        "Huscarl is connected to Y Combinator.",
+        "Huscarl",
+    )
+
+
+def test_linkedin_company_name_from_search_title():
+    source = _bare_linkedin_source()
+
+    assert source._company_name_from_title(
+        "Acme AI | LinkedIn"
+    ) == "Acme AI"
+    assert source._company_name_from_title(
+        "Acme AI: Overview | LinkedIn"
+    ) == "Acme AI"
+    assert source._company_name_from_title(
+        "Bullet (YC S26) | LinkedIn"
+    ) == "Bullet"
+    assert source._company_name_from_title(
+        "Athena (a16z Speedrun SR007) | LinkedIn"
+    ) == "Athena"
+
+
+def test_linkedin_company_candidate_status_is_not_founder_early_signal():
+    candidate = Candidate(
+        company_name="Acme AI",
+        source="linkedin",
+        status=STATUS_LINKEDIN_COMPANY_SIGNAL,
+        url="https://www.linkedin.com/company/acme-ai/",
+        batch="YC F26",
+    )
+
+    assert candidate.status == STATUS_LINKEDIN_COMPANY_SIGNAL
+    assert candidate.is_early_signal is False

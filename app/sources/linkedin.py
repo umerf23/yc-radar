@@ -22,7 +22,11 @@ from urllib.parse import urlparse
 
 import requests
 
-from app.models import STATUS_EARLY_SIGNAL, Candidate
+from app.models import (
+    STATUS_EARLY_SIGNAL,
+    STATUS_LINKEDIN_COMPANY_SIGNAL,
+    Candidate,
+)
 from app.sources.base import Source
 
 SERPER_URL = "https://google.serper.dev/search"
@@ -99,6 +103,24 @@ ACCEPTANCE_MARKERS = (
     "backed by a16z",
 )
 
+# Company-page discovery is deliberately separate from founder-post detection.
+# Search snippets often contain "Similar pages", embedded posts, partners, or
+# unrelated recommendations. A mere YC/Speedrun mention is therefore not enough
+# to claim that the LinkedIn company itself belongs to the programme.
+ANY_YC_BATCH_PATTERN = re.compile(
+    r"\\bYC\\s*([A-Z]\\d{2})\\b",
+    re.IGNORECASE,
+)
+
+VALID_YC_BATCH_LETTERS = {"W", "X", "S", "F"}
+
+DEFAULT_COMPANY_PAGE_QUERIES = (
+    'site:linkedin.com/company ("Y Combinator" OR "YC S26" OR '
+    '"YC F26" OR "YC W27" OR "YC X27")',
+    'site:linkedin.com/company ("a16z Speedrun" OR '
+    '"Speedrun SR007" OR "Speedrun SR008")',
+)
+
 
 class LinkedInSource(Source):
     name = "linkedin"
@@ -113,6 +135,7 @@ class LinkedInSource(Source):
             return []
 
         candidates = self._collect_via_search()
+        candidates.extend(self._collect_company_pages())
 
         # Optional enrichment layer. Absent credentials are not an error.
         if self.config.apify_enabled:
@@ -175,6 +198,87 @@ class LinkedInSource(Source):
             f"prefilter dropped {filtered}, "
             f"invalid links {invalid_links}, "
             f"kept {len(candidates)}."
+        )
+
+        return candidates
+
+    # ---------- LinkedIn company-page discovery ----------
+
+    def _collect_company_pages(self) -> list[Candidate]:
+        """
+        Find newly indexed LinkedIn company pages with programme evidence.
+
+        Search indexing cannot reveal the exact LinkedIn page-creation time.
+        These are therefore labelled LINKEDIN_COMPANY_SIGNAL rather than
+        EARLY_SIGNAL. Persistent pipeline deduplication ensures the same page
+        does not produce repeated alerts on later monitoring cycles.
+        """
+        queries = self.settings.get(
+            "company_page_queries",
+            DEFAULT_COMPANY_PAGE_QUERIES,
+        )
+        limit = self.settings.get("max_results_per_query", 10)
+
+        print(
+            f"[{self.name}] running "
+            f"{len(queries)} company-page queries."
+        )
+
+        candidates: list[Candidate] = []
+        seen_links: set[str] = set()
+        examined = 0
+        filtered = 0
+
+        for query in queries:
+            for item in self._search(query, limit):
+                link = self._canonical_company_url(
+                    item.get("link", "")
+                )
+
+                if not link or link in seen_links:
+                    continue
+
+                seen_links.add(link)
+                examined += 1
+
+                title = item.get("title", "")
+                snippet = item.get("snippet", "")
+                company_name = self._company_name_from_title(title)
+
+                if not company_name:
+                    filtered += 1
+                    continue
+
+                if not self._looks_like_company_page(
+                    title,
+                    snippet,
+                    company_name,
+                ):
+                    filtered += 1
+                    continue
+
+                combined = f"{title} {snippet}"
+
+                candidates.append(
+                    Candidate(
+                        company_name=company_name,
+                        source=self.name,
+                        status=STATUS_LINKEDIN_COMPANY_SIGNAL,
+                        url=link,
+                        batch=self._extract_batch(combined),
+                        post_text=snippet[:600],
+                        confidence=0.7,
+                        extra={
+                            "via": "serper",
+                            "signal_type": "linkedin_company_page",
+                            "title": title,
+                        },
+                    )
+                )
+
+        print(
+            f"[{self.name}] company pages examined {examined}, "
+            f"filtered {filtered}, kept {len(candidates)}."
         )
 
         return candidates
@@ -366,6 +470,188 @@ class LinkedInSource(Source):
 
         host = (parsed.hostname or "").lower()
         return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+    def _is_linkedin_company_url(self, link: str) -> bool:
+        """Return True only for LinkedIn /company/<slug> URLs."""
+        return bool(self._canonical_company_url(link))
+
+    def _canonical_company_url(self, link: str) -> str:
+        """
+        Normalize a LinkedIn company URL to one stable dedupable form.
+
+        Search results may include query strings or subpages such as /about.
+        They all represent the same company page and should collapse to one URL.
+        """
+        try:
+            parsed = urlparse(link)
+        except ValueError:
+            return ""
+
+        if parsed.scheme not in {"http", "https"}:
+            return ""
+
+        host = (parsed.hostname or "").lower()
+
+        if not (
+            host == "linkedin.com"
+            or host.endswith(".linkedin.com")
+        ):
+            return ""
+
+        parts = [
+            part
+            for part in parsed.path.split("/")
+            if part
+        ]
+
+        if (
+            len(parts) < 2
+            or parts[0].lower() != "company"
+            or not parts[1]
+        ):
+            return ""
+
+        return (
+            "https://www.linkedin.com/company/"
+            f"{parts[1]}/"
+        )
+
+    def _looks_like_company_page(
+        self,
+        title: str,
+        snippet: str,
+        company_name: str,
+    ) -> bool:
+        """
+        Require evidence that belongs to THIS company page.
+
+        Google snippets can include related companies, embedded posts and
+        "Similar pages". To avoid false alerts, accept only either:
+
+        1. a valid YC/Speedrun label in the LinkedIn page title itself, or
+        2. the page's own company name followed shortly by programme evidence
+           in the snippet.
+
+        This intentionally prefers a false negative over telling GTM that an
+        unrelated company is YC/Speedrun-backed.
+        """
+        title_text = (title or "").strip()
+        snippet_text = (snippet or "").strip()
+
+        # Reject malformed labels such as "YC P26". Once a company page itself
+        # claims an invalid YC batch, generic YC mentions elsewhere in the
+        # search snippet must not rescue it.
+        for match in ANY_YC_BATCH_PATTERN.finditer(title_text):
+            if match.group(1)[0].upper() not in VALID_YC_BATCH_LETTERS:
+                return False
+
+        # Strongest evidence: the LinkedIn company title itself carries the
+        # programme/cohort label.
+        if BATCH_PATTERN.search(title_text):
+            return True
+
+        title_lower = title_text.lower()
+
+        if "a16z speedrun" in title_lower:
+            return True
+
+        if "speedrun" in title_lower and COHORT_PATTERN.search(title_text):
+            return True
+
+        # Snippet-only evidence must be tied to this exact company name, and
+        # must occur after the company name. This rejects cases such as
+        # "Chromie (YC S26) is partnering with SoloTech".
+        name = (company_name or "").strip()
+        if not name:
+            return False
+
+        name_match = re.search(
+            re.escape(name),
+            snippet_text,
+            flags=re.IGNORECASE,
+        )
+        if not name_match:
+            return False
+
+        after_name = snippet_text[name_match.end(): name_match.end() + 180]
+
+        if BATCH_PATTERN.search(after_name):
+            return True
+
+        if re.search(
+            r"\b(?:accepted\s+(?:into|to)|joining|part\s+of|"
+            r"participating\s+in|backed\s+by)\b.{0,80}"
+            r"\b(?:Y\s+Combinator|YC)\b",
+            after_name,
+            flags=re.IGNORECASE,
+        ):
+            return True
+
+        if re.search(
+            r"\b(?:accepted\s+(?:into|to)|joining|part\s+of|"
+            r"participating\s+in|backed\s+by)\b.{0,80}"
+            r"\ba16z\s+Speedrun\b",
+            after_name,
+            flags=re.IGNORECASE,
+        ):
+            return True
+
+        # "CompanyName ... a16z Speedrun" is acceptable only when the
+        # accelerator reference is close to the company name. This supports
+        # concise LinkedIn About snippets without accepting unrelated posts.
+        if re.search(
+            r"\ba16z\s+Speedrun\b",
+            after_name[:100],
+            flags=re.IGNORECASE,
+        ):
+            return True
+
+        return bool(
+            re.search(
+                r"\bSpeedrun\s+SR\d{3}\b",
+                after_name[:100],
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _company_name_from_title(self, title: str) -> str:
+        """Extract the company name from a LinkedIn company result title."""
+        name = (title or "").strip()
+
+        if not name:
+            return ""
+
+        name = re.sub(
+            r"\s*[|\-–]\s*LinkedIn.*$",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        name = re.sub(
+            r"\s*:\s*(?:overview|about|jobs|people)\s*$",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        # LinkedIn titles often include the accelerator label as if it were
+        # part of the company name, e.g. "Bullet (YC S26) | LinkedIn".
+        # Strip it so dedup/register matching uses the real company name.
+        name = re.sub(
+            r"\s*(?:\(|[-–|]\s*)?"
+            r"(?:YC\s*[WSXF]\d{2}|"
+            r"(?:a16z\s+)?Speedrun(?:\s+SR\d{3})?|SR\d{3})"
+            r"\s*\)?\s*$",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        ).strip()
+
+        if not name or name.lower() == "linkedin":
+            return ""
+
+        return name if len(name) <= 120 else ""
 
     def _author_name(self, title: str) -> str:
         """Pull a person's name from the search result title."""
