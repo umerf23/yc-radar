@@ -212,18 +212,34 @@ def authenticate_pond(
     if authorization is None or not secrets.compare_digest(authorization, expected):
         fail(401, "unauthorized", "The Access Key is missing or invalid.")
 
-    if pond_version is None or re.fullmatch(r"\d+\.\d+", pond_version) is None:
+    raw_version = (pond_version or "").strip()
+
+    # Some HTTP intermediaries may fold repeated identical headers into
+    # a comma-separated value, e.g. "1.0, 1.0".
+    versions = [
+        part.strip()
+        for part in raw_version.split(",")
+        if part.strip()
+    ]
+
+    if not versions or any(
+        re.fullmatch(r"\d+\.\d+", version) is None
+        for version in versions
+    ):
         fail(
             400,
             "invalid_request",
             "The protocol version must be Major.Minor.",
         )
 
-    if pond_version != POND_PROTOCOL_VERSION:
+    if any(
+        version != POND_PROTOCOL_VERSION
+        for version in versions
+    ):
         fail(
             400,
             "unsupported_protocol_version",
-            f"Protocol version {pond_version} is not supported.",
+            f"Protocol version {raw_version} is not supported.",
         )
 
 
