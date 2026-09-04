@@ -40,6 +40,20 @@ class Pipeline:
         started = datetime.now(UTC)
         print(f"\n=== run started {started.isoformat()} ===")
 
+        # Early-signal decisions must use the official state that existed
+        # before this monitoring cycle began. Otherwise YC Directory can
+        # discover a company first in _collect(), causing a founder post
+        # found later in the same cycle to be incorrectly labelled confirmed.
+        #
+        # A completely fresh database has no baseline yet, so leave the
+        # cutoff disabled while the first official directory seed is created.
+        official_count_at_start = self.store.official_count()
+        self.classifier.official_cutoff = (
+            started.isoformat()
+            if official_count_at_start > 0
+            else None
+        )
+
         collected, source_status = self._collect()
         fresh = self.store.filter_new(collected)
         print(f"[pipeline] {len(collected)} collected, {len(fresh)} new.")

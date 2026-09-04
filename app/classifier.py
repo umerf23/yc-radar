@@ -177,6 +177,12 @@ class Classifier:
         )
 
         self._last_call_at = 0.0
+
+        # Set by Pipeline at the beginning of every monitoring cycle.
+        # Official entries first observed after this timestamp do not suppress
+        # founder posts found during the same cycle.
+        self.official_cutoff: str | None = None
+
         self._provider = self._build_provider()
 
     def _build_provider(self) -> LLMProvider | None:
@@ -442,7 +448,29 @@ class Classifier:
 
         candidate.extra["register_checked"] = True
 
-        if official_match:
+        recorded_at = (
+            str(official_match.get("recorded_at") or "")
+            if official_match
+            else ""
+        )
+        official_cutoff = getattr(
+            self,
+            "official_cutoff",
+            None,
+        )
+
+        # If the official entry was first observed after this run started,
+        # it was not part of the baseline used for early-signal decisions.
+        # This prevents source ordering (YC Directory runs before X/LinkedIn)
+        # from converting a same-cycle founder signal into CONFIRMED_YC.
+        official_seen_same_cycle = bool(
+            official_match
+            and official_cutoff
+            and recorded_at
+            and recorded_at >= official_cutoff
+        )
+
+        if official_match and not official_seen_same_cycle:
             official_programme = (
                 official_match.get("programme")
                 or programme
@@ -455,10 +483,12 @@ class Classifier:
             )
 
             candidate.extra["already_listed"] = True
+            candidate.extra["official_seen_same_cycle"] = False
             candidate.extra["official_match"] = {
                 "company_name": official_match.get("company_name", ""),
                 "batch": official_match.get("batch", ""),
                 "profile_url": official_match.get("profile_url", ""),
+                "recorded_at": recorded_at,
                 "programme": official_programme,
                 "match_type": official_match.get("match_type", "exact"),
             }
@@ -466,7 +496,38 @@ class Classifier:
         else:
             candidate.status = STATUS_EARLY_SIGNAL
             candidate.extra["already_listed"] = False
-            candidate.extra.pop("official_match", None)
+            candidate.extra["official_seen_same_cycle"] = (
+                official_seen_same_cycle
+            )
+
+            if official_seen_same_cycle and official_match:
+                candidate.extra["official_first_seen_at"] = recorded_at
+                candidate.extra["official_match"] = {
+                    "company_name": official_match.get(
+                        "company_name",
+                        "",
+                    ),
+                    "batch": official_match.get("batch", ""),
+                    "profile_url": official_match.get(
+                        "profile_url",
+                        "",
+                    ),
+                    "recorded_at": recorded_at,
+                    "programme": (
+                        official_match.get("programme")
+                        or programme
+                    ),
+                    "match_type": official_match.get(
+                        "match_type",
+                        "exact",
+                    ),
+                }
+            else:
+                candidate.extra.pop(
+                    "official_first_seen_at",
+                    None,
+                )
+                candidate.extra.pop("official_match", None)
 
         return candidate
 

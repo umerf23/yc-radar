@@ -302,7 +302,7 @@ class Store:
             if batch_key and batch_key != "speedrun":
                 row = conn.execute(
                     """
-                    SELECT company_name, batch, profile_url
+                    SELECT company_name, batch, profile_url, recorded_at
                     FROM yc_official
                     WHERE normalised_name = ?
                     """,
@@ -321,6 +321,7 @@ class Store:
                     "company_name": row["company_name"],
                     "batch": row["batch"] or "",
                     "profile_url": row["profile_url"] or "",
+                    "recorded_at": row["recorded_at"] or "",
                     "programme": matched_programme,
                     "match_type": "exact_batch",
                 }
@@ -330,7 +331,7 @@ class Store:
             if programme_key == "speedrun" or batch_key == "speedrun":
                 row = conn.execute(
                     """
-                    SELECT company_name, batch, profile_url
+                    SELECT company_name, batch, profile_url, recorded_at
                     FROM yc_official
                     WHERE normalised_name LIKE ?
                        OR normalised_name = ?
@@ -350,6 +351,7 @@ class Store:
                     "company_name": row["company_name"],
                     "batch": row["batch"] or "",
                     "profile_url": row["profile_url"] or "",
+                    "recorded_at": row["recorded_at"] or "",
                     "programme": "speedrun",
                     "match_type": "programme_name",
                 }
@@ -358,7 +360,7 @@ class Store:
             if programme_key == "yc":
                 row = conn.execute(
                     """
-                    SELECT company_name, batch, profile_url
+                    SELECT company_name, batch, profile_url, recorded_at
                     FROM yc_official
                     WHERE normalised_name LIKE ?
                     ORDER BY recorded_at DESC
@@ -374,6 +376,7 @@ class Store:
                     "company_name": row["company_name"],
                     "batch": row["batch"] or "",
                     "profile_url": row["profile_url"] or "",
+                    "recorded_at": row["recorded_at"] or "",
                     "programme": "yc",
                     "match_type": "programme_name",
                 }
@@ -383,7 +386,7 @@ class Store:
             # what actually matched.
             row = conn.execute(
                 """
-                SELECT company_name, batch, profile_url
+                SELECT company_name, batch, profile_url, recorded_at
                 FROM yc_official
                 WHERE normalised_name LIKE ?
                 ORDER BY recorded_at DESC
@@ -399,6 +402,7 @@ class Store:
             "company_name": row["company_name"],
             "batch": row["batch"] or "",
             "profile_url": row["profile_url"] or "",
+            "recorded_at": row["recorded_at"] or "",
             "programme": programme_from_batch(row["batch"]),
             "match_type": "name_only",
         }

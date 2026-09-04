@@ -423,6 +423,7 @@ def test_generic_yc_matches_same_company_any_yc_batch(store):
 def _classifier_with_store(store):
     classifier = object.__new__(Classifier)
     classifier.store = store
+    classifier.official_cutoff = None
     return classifier
 
 
@@ -573,3 +574,79 @@ def test_classifier_confirms_generic_speedrun_against_cohort(store):
 
     assert result.status == STATUS_CONFIRMED_SPEEDRUN
     assert result.extra["already_listed"] is True
+
+# ---------- same-cycle early-signal semantics ----------
+
+
+def test_classifier_marks_same_cycle_official_yc_as_early(store):
+    """
+    An official entry first observed after the cycle cutoff must not suppress
+    a founder signal collected during that same monitoring cycle.
+    """
+    classifier = _classifier_with_store(store)
+    classifier.official_cutoff = "2000-01-01T00:00:00+00:00"
+
+    store.record_official(
+        "Acme AI",
+        "Fall 2026",
+        "https://example.com/acme",
+    )
+
+    candidate = _candidate(
+        "",
+        post_text="Acme AI was accepted into YC F26.",
+        batch="YC F26",
+    )
+
+    result = classifier._apply_verdict(
+        candidate,
+        {
+            "company_name": "Acme AI",
+            "batch": "YC F26",
+            "description": "",
+            "reason": "announcement",
+        },
+        0.95,
+    )
+
+    assert result.status == STATUS_EARLY_SIGNAL
+    assert result.extra["already_listed"] is False
+    assert result.extra["register_checked"] is True
+    assert result.extra["official_seen_same_cycle"] is True
+    assert result.extra["official_first_seen_at"]
+    assert result.extra["official_match"]["recorded_at"]
+
+
+def test_classifier_confirms_company_known_before_cycle(store):
+    """A pre-existing official entry must remain confirmed."""
+    store.record_official(
+        "Acme AI",
+        "Fall 2026",
+        "https://example.com/acme",
+    )
+
+    classifier = _classifier_with_store(store)
+    classifier.official_cutoff = "9999-12-31T23:59:59+00:00"
+
+    candidate = _candidate(
+        "",
+        post_text="Acme AI was accepted into YC F26.",
+        batch="YC F26",
+    )
+
+    result = classifier._apply_verdict(
+        candidate,
+        {
+            "company_name": "Acme AI",
+            "batch": "YC F26",
+            "description": "",
+            "reason": "announcement",
+        },
+        0.95,
+    )
+
+    assert result.status == STATUS_CONFIRMED_YC
+    assert result.extra["already_listed"] is True
+    assert result.extra["register_checked"] is True
+    assert result.extra["official_seen_same_cycle"] is False
+    assert result.extra["official_match"]["recorded_at"]
