@@ -4,7 +4,7 @@
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)](https://fastapi.tiangolo.com/)
 [![Docker](https://img.shields.io/badge/Deployment-Docker-2496ED)](https://www.docker.com/)
 [![Railway](https://img.shields.io/badge/Hosted%20on-Railway-0B0D0E)](https://railway.com/)
-[![Tests](https://img.shields.io/badge/tests-51%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-58%20passing-brightgreen)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **Persistent startup monitoring for GTM teams.** YC Radar watches YC company listings, a16z Speedrun, X/Twitter, and public LinkedIn founder signals, verifies whether a startup is already officially listed, deduplicates results, and sends qualified alerts to Slack.
