@@ -132,6 +132,33 @@ def test_filter_new_deduplicates_within_one_run(store):
     assert len(fresh) == 1
 
 
+def test_dashboard_returns_only_delivered_candidates(store):
+    delivered = _candidate(
+        "Signal Labs",
+        url="https://example.com/signal",
+        founder_handle="@founder",
+        confidence=0.91,
+    )
+    rejected = _candidate("Noisy Result", confidence=0.2)
+
+    store.record(delivered, alerted=True)
+    store.record(rejected, alerted=False)
+
+    rows = store.recent_candidates()
+
+    assert len(rows) == 1
+    assert rows[0]["company_name"] == "Signal Labs"
+    assert rows[0]["alerted"] is True
+    assert rows[0]["founder_handle"] == "@founder"
+
+
+def test_early_signal_total_counts_only_delivered_signals(store):
+    store.record(_candidate("Delivered"), alerted=True)
+    store.record(_candidate("Rejected"), alerted=False)
+
+    assert store.stats()["early_signals"] == 1
+
+
 # ---------- official register ----------
 
 

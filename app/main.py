@@ -18,13 +18,15 @@ import sqlite3
 import sys
 import threading
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.config import load_config
@@ -44,6 +46,9 @@ app = FastAPI(
     title="YC Radar",
     version=POND_AGENT_VERSION,
 )
+
+WEB_DIR = Path(__file__).resolve().parent / "web"
+app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
 class RunRequest(BaseModel):
@@ -180,10 +185,18 @@ def manifest() -> dict[str, Any]:
     }
 
 
-@app.get("/")
-def root() -> dict[str, str]:
+@app.get("/", include_in_schema=False)
+def root() -> FileResponse:
+    """Serve the YC Radar operator dashboard."""
+    return FileResponse(WEB_DIR / "index.html")
+
+
+@app.get("/api", include_in_schema=False)
+def api_index() -> dict[str, str]:
+    """Retain a small machine-readable endpoint index."""
     return {
         "service": "yc-radar",
+        "dashboard": "/",
         "health": "/health",
         "manifest": "/manifest",
         "runs": "/runs",
@@ -255,6 +268,30 @@ def authenticate_pond(
             "unsupported_protocol_version",
             f"Protocol version {raw_version} is not supported.",
         )
+
+
+@app.get("/api/dashboard", dependencies=[Depends(authenticate_pond)])
+def dashboard_data(limit: int = 100) -> dict[str, Any]:
+    """Return one compact, authenticated dashboard snapshot."""
+    config = load_config()
+    dashboard_store = Store(config.db_path)
+
+    return {
+        "status": "ok" if _last_run else "starting",
+        "service": "yc-radar",
+        "started_at": _started_at,
+        "poll_interval_hours": config.poll_interval_hours,
+        "last_run": _last_run,
+        "totals": dashboard_store.stats(),
+        "sources": dashboard_store.source_health(),
+        "candidates": dashboard_store.recent_candidates(limit=limit),
+    }
+
+
+@app.post("/api/run", dependencies=[Depends(authenticate_pond)])
+def dashboard_run() -> dict[str, Any]:
+    """Start a monitoring cycle from the operator dashboard."""
+    return run_cycle(load_config(), send_summary=False)
 
 
 @app.get(

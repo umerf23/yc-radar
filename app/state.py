@@ -542,6 +542,44 @@ class Store:
             for row in rows
         }
 
+    def recent_candidates(
+        self,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        """Return the newest candidate signals for the operator dashboard."""
+        safe_limit = max(1, min(limit, 250))
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    dedup_key,
+                    company_name,
+                    source,
+                    status,
+                    batch,
+                    url,
+                    founder_handle,
+                    confidence,
+                    alerted,
+                    first_seen_at,
+                    last_seen_at
+                FROM seen_candidates
+                WHERE alerted = 1
+                ORDER BY first_seen_at DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            ).fetchall()
+
+        return [
+            {
+                **dict(row),
+                "alerted": bool(row["alerted"]),
+            }
+            for row in rows
+        ]
+
     def stats(self) -> dict[str, int]:
         """Summary counts, used by the health endpoint."""
         with self._connect() as conn:
@@ -562,6 +600,7 @@ class Store:
                 SELECT COUNT(*)
                 FROM seen_candidates
                 WHERE status = 'EARLY_SIGNAL'
+                  AND alerted = 1
                 """
             ).fetchone()[0]
 

@@ -4,7 +4,7 @@
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)](https://fastapi.tiangolo.com/)
 [![Docker](https://img.shields.io/badge/Deployment-Docker-2496ED)](https://www.docker.com/)
 [![Railway](https://img.shields.io/badge/Hosted%20on-Railway-0B0D0E)](https://railway.com/)
-[![Tests](https://img.shields.io/badge/tests-58%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-60%20passing-brightgreen)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **Persistent startup monitoring for GTM teams.** YC Radar watches YC company listings, a16z Speedrun, X/Twitter, and public LinkedIn founder signals, verifies whether a startup is already officially listed, deduplicates results, and sends qualified alerts to Slack.
@@ -19,6 +19,7 @@ The system is designed for the moment when timing matters most: a founder public
 |---|---|
 | GitHub repository | https://github.com/umerf23/yc-radar |
 | Production service | https://yc-radar-production.up.railway.app |
+| Operator dashboard | https://yc-radar-production.up.railway.app |
 | Health endpoint | https://yc-radar-production.up.railway.app/health |
 | Pond manifest | https://yc-radar-production.up.railway.app/manifest |
 
@@ -44,9 +45,10 @@ YC Radar was built as a **single-workspace personal Slack monitoring agent** for
 | Slack delivery | Qualified candidates are routed to a configured Slack channel, with optional early/confirmed channel overrides |
 | Extensible architecture | Every source implements the same `Source` interface and produces the same `Candidate` model |
 | Health/operational visibility | `/health` exposes run summary, source status, and persistent totals |
+| Operator dashboard | Authenticated signal inbox, source health, filters, outreach-copy action, and manual scans |
 | Pond integration | Pond Protocol V1 `/manifest`, authenticated `/runs`, idempotency, and compatibility `/tasks/{task_id}` route |
 | Deployment | Dockerized and deployed on Railway with persistent storage |
-| Tests | **51 passing tests** on the final verified local baseline |
+| Tests | **60 passing tests** on the final verified local baseline |
 
 ---
 
@@ -585,6 +587,26 @@ run_monitoring_cycle
 get_monitoring_status
 ```
 
+## Web dashboard
+
+Open the deployment root URL in a browser and enter the same
+`POND_ACCESS_KEY` configured on Railway. The key is kept only in the current
+browser tab.
+
+The dashboard provides:
+
+- an overview of delivered early signals, Slack alerts, candidates processed,
+  and official companies known
+- live health for all four collectors
+- an authenticated signal inbox with search and status/source filters
+- direct links to original posts plus a one-click outreach brief
+- a manual **Run scan now** action
+- a copy-ready Pond manifest URL and setup guide
+
+Only candidates that passed classification and were successfully delivered are
+shown in the signal inbox. Raw rejected candidates remain in SQLite for
+deduplication but do not inflate the actionable early-signal count.
+
 ## Authenticated execution
 
 ```text
@@ -892,17 +914,31 @@ rather than importing the FastAPI app directly, because the scheduler is started
 
 ## `GET /`
 
+Authenticated operator dashboard.
+
+## `GET /api`
+
 Service discovery:
 
 ```json
 {
   "service": "yc-radar",
+  "dashboard": "/",
   "health": "/health",
   "manifest": "/manifest",
   "runs": "/runs",
   "tasks": "/tasks/{task_id}"
 }
 ```
+
+## `GET /api/dashboard`
+
+Authenticated dashboard snapshot containing totals, source health, latest run,
+and up to 250 delivered candidate signals.
+
+## `POST /api/run`
+
+Authenticated manual monitoring cycle used by the dashboard.
 
 ## `GET /health`
 
@@ -1050,7 +1086,7 @@ A failed run does not falsely advance the successful incremental timestamp for a
 
 - Secrets belong in `.env` locally and hosting-provider environment variables in production.
 - `.env` should never be committed.
-- Pond `/runs` is protected with a bearer access key.
+- Pond `/runs` and dashboard `/api/*` routes are protected with the same bearer access key.
 - Pond request reuse is guarded by persisted request hashing/idempotency.
 - Slack and provider credentials should be rotated immediately if exposed in logs, screenshots, commits, or shell history.
 - The public `/health` and `/manifest` endpoints do not require provider secrets.
