@@ -59,6 +59,17 @@ CREATE TABLE IF NOT EXISTS yc_official (
     profile_url     TEXT,
     recorded_at     TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS slack_installations (
+    team_id             TEXT PRIMARY KEY,
+    team_name           TEXT NOT NULL,
+    channel_id          TEXT NOT NULL,
+    channel_name        TEXT NOT NULL,
+    webhook_encrypted   TEXT NOT NULL,
+    installed_at        TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    last_manual_run_at  TEXT
+);
 """
 
 
@@ -579,6 +590,87 @@ class Store:
             }
             for row in rows
         ]
+
+    # ---------- Slack OAuth installations ----------
+
+    def save_slack_installation(
+        self,
+        team_id: str,
+        team_name: str,
+        channel_id: str,
+        channel_name: str,
+        webhook_encrypted: str,
+    ) -> None:
+        """Persist or refresh one workspace's encrypted incoming webhook."""
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO slack_installations (
+                    team_id, team_name, channel_id, channel_name,
+                    webhook_encrypted, installed_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(team_id) DO UPDATE SET
+                    team_name = excluded.team_name,
+                    channel_id = excluded.channel_id,
+                    channel_name = excluded.channel_name,
+                    webhook_encrypted = excluded.webhook_encrypted,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    team_id,
+                    team_name,
+                    channel_id,
+                    channel_name,
+                    webhook_encrypted,
+                    now,
+                    now,
+                ),
+            )
+
+    def slack_installation(self, team_id: str) -> dict[str, object] | None:
+        """Return one installed workspace without decrypting its webhook."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT team_id, team_name, channel_id, channel_name,
+                       webhook_encrypted, installed_at, updated_at,
+                       last_manual_run_at
+                FROM slack_installations
+                WHERE team_id = ?
+                """,
+                (team_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def claim_slack_run(self, team_id: str, cooldown_seconds: int = 300) -> bool:
+        """Atomically enforce a short cooldown on manual provider scans."""
+        now = datetime.now(UTC)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT last_manual_run_at
+                FROM slack_installations
+                WHERE team_id = ?
+                """,
+                (team_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            if row["last_manual_run_at"]:
+                previous = datetime.fromisoformat(row["last_manual_run_at"])
+                if (now - previous).total_seconds() < cooldown_seconds:
+                    return False
+            conn.execute(
+                """
+                UPDATE slack_installations
+                SET last_manual_run_at = ?, updated_at = ?
+                WHERE team_id = ?
+                """,
+                (now.isoformat(), now.isoformat(), team_id),
+            )
+        return True
 
     def stats(self) -> dict[str, int]:
         """Summary counts, used by the health endpoint."""

@@ -4,7 +4,7 @@
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)](https://fastapi.tiangolo.com/)
 [![Docker](https://img.shields.io/badge/Deployment-Docker-2496ED)](https://www.docker.com/)
 [![Railway](https://img.shields.io/badge/Hosted%20on-Railway-0B0D0E)](https://railway.com/)
-[![Tests](https://img.shields.io/badge/tests-60%20passing-brightgreen)](#testing)
+[![Tests](https://img.shields.io/badge/tests-61%20passing-brightgreen)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **Persistent startup monitoring for GTM teams.** YC Radar watches YC company listings, a16z Speedrun, X/Twitter, and public LinkedIn founder signals, verifies whether a startup is already officially listed, deduplicates results, and sends qualified alerts to Slack.
@@ -48,7 +48,7 @@ YC Radar was built as a **single-workspace personal Slack monitoring agent** for
 | Operator dashboard | Authenticated signal inbox, source health, filters, outreach-copy action, and manual scans |
 | Pond integration | Pond Protocol V1 `/manifest`, authenticated `/runs`, idempotency, and compatibility `/tasks/{task_id}` route |
 | Deployment | Dockerized and deployed on Railway with persistent storage |
-| Tests | **60 passing tests** on the final verified local baseline |
+| Tests | **61 passing tests** on the final verified local baseline |
 
 ---
 
@@ -589,23 +589,46 @@ get_monitoring_status
 
 ## Web dashboard
 
-Open the deployment root URL in a browser and enter the same
-`POND_ACCESS_KEY` configured on Railway. The key is kept only in the current
-browser tab.
+Open the deployment root URL in a browser. The read-only signal dashboard
+loads directly and never asks the viewer for a Pond access key.
 
 The dashboard provides:
 
 - an overview of delivered early signals, Slack alerts, candidates processed,
   and official companies known
 - live health for all four collectors
-- an authenticated signal inbox with search and status/source filters
-- direct links to original posts plus a one-click outreach brief
-- a manual **Run scan now** action
+- aggregate monitoring performance without exposing private lead details
+- an optional **Add to Slack** OAuth flow for additional workspaces
+- channel selection inside Slack's own permission screen
+- an authenticated, rate-limited **Run scan and send leads** action
 - a copy-ready Pond manifest URL and setup guide
 
 Only candidates that passed classification and were successfully delivered are
-shown in the signal inbox. Raw rejected candidates remain in SQLite for
-deduplication but do not inflate the actionable early-signal count.
+counted as actionable signals. Company names, founder handles, and source URLs
+remain private in Slack and Pond rather than appearing on the public dashboard.
+
+### Optional multi-workspace Slack setup
+
+The original `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` configuration remains the
+default single-workspace delivery path required by the bounty. To also let
+other workspaces install YC Radar, configure Slack OAuth with the
+`incoming-webhook` bot scope and add this redirect URL in Slack:
+
+```text
+https://your-deployment.example/slack/oauth/callback
+```
+
+Then set `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_REDIRECT_URI`,
+`SLACK_TOKEN_ENCRYPTION_KEY`, and `SLACK_SESSION_SECRET` on Railway. Generate
+the encryption key with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Use a separate long random value for `SLACK_SESSION_SECRET`. OAuth installation
+webhooks are encrypted in SQLite. Slack chooses the destination channel during
+its own approval flow, so users never paste a bot token into YC Radar.
 
 ## Authenticated execution
 
@@ -933,12 +956,16 @@ Service discovery:
 
 ## `GET /api/dashboard`
 
-Authenticated dashboard snapshot containing totals, source health, latest run,
-and up to 250 delivered candidate signals.
+Read-only dashboard snapshot containing totals, source health, and the latest
+run. It contains no candidate details, provider credentials, Slack tokens, or
+Pond access secrets.
 
-## `POST /api/run`
+## Slack workspace routes
 
-Authenticated manual monitoring cycle used by the dashboard.
+- `GET /slack/install` starts Slack OAuth.
+- `GET /slack/oauth/callback` completes installation and stores the encrypted webhook.
+- `GET /api/slack/status` reports only the current browser's workspace and channel.
+- `POST /api/slack/run` runs a scan for a connected workspace, applies a five-minute cooldown, and sends results to its selected channel.
 
 ## `GET /health`
 
@@ -1086,7 +1113,9 @@ A failed run does not falsely advance the successful incremental timestamp for a
 
 - Secrets belong in `.env` locally and hosting-provider environment variables in production.
 - `.env` should never be committed.
-- Pond `/runs` and dashboard `/api/*` routes are protected with the same bearer access key.
+- Pond `/runs` remains protected with a bearer access key.
+- The dashboard is read-only and never exposes provider, Slack, or Pond credentials.
+- OAuth webhook URLs are encrypted at rest and workspace sessions use signed, HTTP-only cookies.
 - Pond request reuse is guarded by persisted request hashing/idempotency.
 - Slack and provider credentials should be rotated immediately if exposed in logs, screenshots, commits, or shell history.
 - The public `/health` and `/manifest` endpoints do not require provider secrets.

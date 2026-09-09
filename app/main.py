@@ -10,6 +10,7 @@ Usage:
 """
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -17,15 +18,19 @@ import secrets
 import sqlite3
 import sys
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
+import requests
 import uvicorn
 from apscheduler.schedulers.background import BackgroundScheduler
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -41,6 +46,10 @@ _last_run: dict[str, Any] = {}
 _started_at = datetime.now(UTC).isoformat()
 _pipeline_lock = threading.Lock()
 _pond_run_lock = threading.Lock()
+
+SLACK_SESSION_COOKIE = "yc_radar_workspace"
+SLACK_STATE_COOKIE = "yc_radar_oauth_state"
+SLACK_OAUTH_SCOPES = "incoming-webhook"
 
 app = FastAPI(
     title="YC Radar",
@@ -270,9 +279,9 @@ def authenticate_pond(
         )
 
 
-@app.get("/api/dashboard", dependencies=[Depends(authenticate_pond)])
-def dashboard_data(limit: int = 100) -> dict[str, Any]:
-    """Return one compact, authenticated dashboard snapshot."""
+@app.get("/api/dashboard")
+def dashboard_data() -> dict[str, Any]:
+    """Return one compact dashboard snapshot with no secret values."""
     config = load_config()
     dashboard_store = Store(config.db_path)
 
@@ -284,14 +293,252 @@ def dashboard_data(limit: int = 100) -> dict[str, Any]:
         "last_run": _last_run,
         "totals": dashboard_store.stats(),
         "sources": dashboard_store.source_health(),
-        "candidates": dashboard_store.recent_candidates(limit=limit),
     }
 
 
-@app.post("/api/run", dependencies=[Depends(authenticate_pond)])
-def dashboard_run() -> dict[str, Any]:
-    """Start a monitoring cycle from the operator dashboard."""
-    return run_cycle(load_config(), send_summary=False)
+def _slack_oauth_settings() -> dict[str, str] | None:
+    """Return complete Slack OAuth settings or None when not configured."""
+    settings = {
+        "client_id": os.getenv("SLACK_CLIENT_ID", "").strip(),
+        "client_secret": os.getenv("SLACK_CLIENT_SECRET", "").strip(),
+        "redirect_uri": os.getenv("SLACK_REDIRECT_URI", "").strip(),
+        "encryption_key": os.getenv("SLACK_TOKEN_ENCRYPTION_KEY", "").strip(),
+        "session_secret": os.getenv("SLACK_SESSION_SECRET", "").strip(),
+    }
+    return settings if all(settings.values()) else None
+
+
+def _session_value(team_id: str, secret: str) -> str:
+    timestamp = str(int(time.time()))
+    payload = f"{team_id}.{timestamp}"
+    signature = hmac.new(
+        secret.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def _session_team(request: Request, secret: str) -> str | None:
+    value = request.cookies.get(SLACK_SESSION_COOKIE, "")
+    try:
+        team_id, timestamp, signature = value.split(".", 2)
+        payload = f"{team_id}.{timestamp}"
+        expected = hmac.new(
+            secret.encode(), payload.encode(), hashlib.sha256
+        ).hexdigest()
+        if not secrets.compare_digest(signature, expected):
+            return None
+        if int(time.time()) - int(timestamp) > 30 * 24 * 60 * 60:
+            return None
+        return team_id
+    except (TypeError, ValueError):
+        return None
+
+
+def _oauth_store() -> Store:
+    return Store(load_config().db_path)
+
+
+@app.get("/slack/install", include_in_schema=False)
+def slack_install() -> RedirectResponse:
+    """Begin Slack's OAuth flow; Slack itself asks for the destination channel."""
+    settings = _slack_oauth_settings()
+    if settings is None:
+        fail(503, "slack_oauth_unavailable", "Slack installation is not configured yet.")
+
+    state = secrets.token_urlsafe(32)
+    query = urlencode(
+        {
+            "client_id": settings["client_id"],
+            "scope": SLACK_OAUTH_SCOPES,
+            "redirect_uri": settings["redirect_uri"],
+            "state": state,
+        }
+    )
+    response = RedirectResponse(f"https://slack.com/oauth/v2/authorize?{query}")
+    response.set_cookie(
+        SLACK_STATE_COOKIE,
+        state,
+        max_age=600,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/slack/oauth/callback", include_in_schema=False)
+def slack_oauth_callback(
+    request: Request,
+    code: str = "",
+    state: str = "",
+    error: str = "",
+) -> RedirectResponse:
+    """Exchange Slack's short-lived code and retain an encrypted webhook."""
+    settings = _slack_oauth_settings()
+    expected_state = request.cookies.get(SLACK_STATE_COOKIE, "")
+    if settings is None:
+        return RedirectResponse("/?slack=not_configured#slack")
+    if error:
+        return RedirectResponse("/?slack=cancelled#slack")
+    if not code or not state or not expected_state or not secrets.compare_digest(
+        state, expected_state
+    ):
+        return RedirectResponse("/?slack=invalid_state#slack")
+
+    result = requests.post(
+        "https://slack.com/api/oauth.v2.access",
+        data={
+            "client_id": settings["client_id"],
+            "client_secret": settings["client_secret"],
+            "code": code,
+            "redirect_uri": settings["redirect_uri"],
+        },
+        timeout=20,
+    ).json()
+    incoming = result.get("incoming_webhook") or {}
+    team = result.get("team") or {}
+    if not result.get("ok") or not incoming.get("url") or not team.get("id"):
+        return RedirectResponse("/?slack=oauth_failed#slack")
+
+    try:
+        encrypted = Fernet(settings["encryption_key"].encode()).encrypt(
+            incoming["url"].encode()
+        ).decode()
+    except (ValueError, TypeError):
+        return RedirectResponse("/?slack=server_config#slack")
+
+    _oauth_store().save_slack_installation(
+        team_id=team["id"],
+        team_name=team.get("name") or "Slack workspace",
+        channel_id=incoming.get("channel_id") or "",
+        channel_name=incoming.get("channel") or "Selected channel",
+        webhook_encrypted=encrypted,
+    )
+    response = RedirectResponse("/?slack=connected#slack")
+    response.delete_cookie(SLACK_STATE_COOKIE)
+    response.set_cookie(
+        SLACK_SESSION_COOKIE,
+        _session_value(team["id"], settings["session_secret"]),
+        max_age=30 * 24 * 60 * 60,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/api/slack/status")
+def slack_status(request: Request) -> dict[str, Any]:
+    """Report OAuth availability and this browser's connected workspace."""
+    settings = _slack_oauth_settings()
+    if settings is None:
+        return {"available": False, "connected": False}
+    team_id = _session_team(request, settings["session_secret"])
+    installation = _oauth_store().slack_installation(team_id) if team_id else None
+    if installation is None:
+        return {"available": True, "connected": False}
+    return {
+        "available": True,
+        "connected": True,
+        "workspace": installation["team_name"],
+        "channel": installation["channel_name"],
+        "last_manual_run_at": installation["last_manual_run_at"],
+    }
+
+
+def _workspace_blocks(candidate: dict[str, object]) -> list[dict[str, Any]]:
+    """Build a compact Slack alert from the persisted safe candidate fields."""
+    heading = (
+        "EARLY SIGNAL — founder announced before official listing"
+        if candidate["status"] == "EARLY_SIGNAL"
+        else "NEW ACCELERATOR COMPANY"
+    )
+    fields = [
+        f"*Company*\n{candidate['company_name'] or 'Not stated'}",
+        f"*Batch*\n{candidate['batch'] or 'Unknown'}",
+        f"*Source*\n{candidate['source']}",
+        f"*Confidence*\n{float(candidate['confidence'] or 0):.0%}",
+    ]
+    blocks: list[dict[str, Any]] = [
+        {"type": "header", "text": {"type": "plain_text", "text": heading}},
+        {
+            "type": "section",
+            "fields": [{"type": "mrkdwn", "text": field} for field in fields],
+        },
+    ]
+    if candidate.get("url"):
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"<{candidate['url']}|Open original source>",
+                },
+            }
+        )
+    return blocks
+
+
+@app.post("/api/slack/run")
+def run_for_slack_workspace(
+    request: Request,
+    action_header: str | None = Header(default=None, alias="X-YC-Radar-Action"),
+) -> dict[str, Any]:
+    """Run the shared monitor and deliver this cycle's leads to one workspace."""
+    settings = _slack_oauth_settings()
+    if settings is None or action_header != "run":
+        fail(403, "forbidden", "Slack workspace authorization is required.")
+    team_id = _session_team(request, settings["session_secret"])
+    store = _oauth_store()
+    installation = store.slack_installation(team_id) if team_id else None
+    if installation is None:
+        fail(401, "slack_not_connected", "Connect a Slack workspace first.")
+    first_workspace_run = installation["last_manual_run_at"] is None
+    if not store.claim_slack_run(team_id):
+        fail(429, "run_cooldown", "Please wait five minutes before running again.")
+
+    try:
+        webhook_url = Fernet(settings["encryption_key"].encode()).decrypt(
+            str(installation["webhook_encrypted"]).encode()
+        ).decode()
+    except (InvalidToken, ValueError, TypeError):
+        fail(503, "slack_connection_invalid", "Reconnect this Slack workspace.")
+
+    summary = run_cycle(load_config(), send_summary=False)
+    started_at = summary.get("started_at", "")
+    delivered = [
+        item
+        for item in store.recent_candidates(limit=250)
+        if str(item["first_seen_at"]) >= started_at
+    ]
+    # A newly connected workspace should receive something useful even when
+    # the global scheduler already saw every result in this particular scan.
+    # Only the first manual run gets this small recent backlog.
+    if not delivered and first_workspace_run:
+        delivered = store.recent_candidates(limit=5)
+    for candidate in delivered:
+        response = requests.post(
+            webhook_url,
+            json={
+                "text": f"YC Radar: {candidate['company_name']}",
+                "blocks": _workspace_blocks(candidate),
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+    if not delivered:
+        requests.post(
+            webhook_url,
+            json={
+                "text": (
+                    "YC Radar scan complete — "
+                    f"{summary.get('examined', 0)} examined, "
+                    "no new qualified leads."
+                )
+            },
+            timeout=20,
+        ).raise_for_status()
+    return {"status": "completed", "delivered": len(delivered), "summary": summary}
 
 
 @app.get(

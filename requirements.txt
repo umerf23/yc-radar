@@ -7,4 +7,5 @@ fastapi==0.115.5
 uvicorn==0.32.1
 google-genai==1.46.0
 beautifulsoup4==4.12.3
+cryptography>=44.0,<48.0
 pytest>=8.0

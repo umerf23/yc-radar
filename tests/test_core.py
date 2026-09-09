@@ -159,6 +159,24 @@ def test_early_signal_total_counts_only_delivered_signals(store):
     assert store.stats()["early_signals"] == 1
 
 
+def test_slack_installation_and_run_cooldown(store):
+    store.save_slack_installation(
+        team_id="T123",
+        team_name="Rho",
+        channel_id="C123",
+        channel_name="yc-leads",
+        webhook_encrypted="encrypted-value",
+    )
+
+    installation = store.slack_installation("T123")
+
+    assert installation is not None
+    assert installation["team_name"] == "Rho"
+    assert installation["channel_name"] == "yc-leads"
+    assert store.claim_slack_run("T123") is True
+    assert store.claim_slack_run("T123") is False
+
+
 # ---------- official register ----------
 
 
