@@ -177,6 +177,28 @@ def test_slack_installation_and_run_cooldown(store):
     assert store.claim_slack_run("T123") is False
 
 
+def test_bot_oauth_installation_can_select_channel(store):
+    store.save_slack_installation(
+        team_id="T456",
+        team_name="Acme",
+        bot_token_encrypted="encrypted-bot-token",
+        bot_user_id="U456",
+    )
+
+    before = store.slack_installation("T456")
+    assert before is not None
+    assert before["channel_id"] == ""
+    assert before["bot_user_id"] == "U456"
+
+    assert store.update_slack_channel("T456", "C456", "yc-leads") is True
+    after = store.slack_installation("T456")
+
+    assert after is not None
+    assert after["channel_id"] == "C456"
+    assert after["channel_name"] == "yc-leads"
+    assert len(store.slack_installations()) == 1
+
+
 # ---------- official register ----------
 
 

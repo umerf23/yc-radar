@@ -63,9 +63,11 @@ CREATE TABLE IF NOT EXISTS yc_official (
 CREATE TABLE IF NOT EXISTS slack_installations (
     team_id             TEXT PRIMARY KEY,
     team_name           TEXT NOT NULL,
-    channel_id          TEXT NOT NULL,
-    channel_name        TEXT NOT NULL,
-    webhook_encrypted   TEXT NOT NULL,
+    channel_id          TEXT NOT NULL DEFAULT '',
+    channel_name        TEXT NOT NULL DEFAULT '',
+    webhook_encrypted   TEXT NOT NULL DEFAULT '',
+    bot_token_encrypted TEXT NOT NULL DEFAULT '',
+    bot_user_id         TEXT NOT NULL DEFAULT '',
     installed_at        TEXT NOT NULL,
     updated_at          TEXT NOT NULL,
     last_manual_run_at  TEXT
@@ -120,6 +122,21 @@ class Store:
                 SET last_success_at = last_run_at
                 WHERE last_error IS NULL
                 """
+            )
+
+        slack_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(slack_installations)")
+        }
+        if "bot_token_encrypted" not in slack_columns:
+            conn.execute(
+                "ALTER TABLE slack_installations "
+                "ADD COLUMN bot_token_encrypted TEXT NOT NULL DEFAULT ''"
+            )
+        if "bot_user_id" not in slack_columns:
+            conn.execute(
+                "ALTER TABLE slack_installations "
+                "ADD COLUMN bot_user_id TEXT NOT NULL DEFAULT ''"
             )
 
     # ---------- candidate deduplication ----------
@@ -597,25 +614,47 @@ class Store:
         self,
         team_id: str,
         team_name: str,
-        channel_id: str,
-        channel_name: str,
-        webhook_encrypted: str,
+        channel_id: str = "",
+        channel_name: str = "",
+        webhook_encrypted: str = "",
+        bot_token_encrypted: str = "",
+        bot_user_id: str = "",
     ) -> None:
-        """Persist or refresh one workspace's encrypted incoming webhook."""
+        """Persist or refresh one workspace's Slack OAuth installation."""
         now = datetime.now(UTC).isoformat()
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO slack_installations (
                     team_id, team_name, channel_id, channel_name,
-                    webhook_encrypted, installed_at, updated_at
+                    webhook_encrypted, bot_token_encrypted, bot_user_id,
+                    installed_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(team_id) DO UPDATE SET
                     team_name = excluded.team_name,
-                    channel_id = excluded.channel_id,
-                    channel_name = excluded.channel_name,
-                    webhook_encrypted = excluded.webhook_encrypted,
+                    channel_id = CASE
+                        WHEN excluded.channel_id <> '' THEN excluded.channel_id
+                        ELSE slack_installations.channel_id
+                    END,
+                    channel_name = CASE
+                        WHEN excluded.channel_name <> '' THEN excluded.channel_name
+                        ELSE slack_installations.channel_name
+                    END,
+                    webhook_encrypted = CASE
+                        WHEN excluded.webhook_encrypted <> ''
+                        THEN excluded.webhook_encrypted
+                        ELSE slack_installations.webhook_encrypted
+                    END,
+                    bot_token_encrypted = CASE
+                        WHEN excluded.bot_token_encrypted <> ''
+                        THEN excluded.bot_token_encrypted
+                        ELSE slack_installations.bot_token_encrypted
+                    END,
+                    bot_user_id = CASE
+                        WHEN excluded.bot_user_id <> '' THEN excluded.bot_user_id
+                        ELSE slack_installations.bot_user_id
+                    END,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -624,10 +663,45 @@ class Store:
                     channel_id,
                     channel_name,
                     webhook_encrypted,
+                    bot_token_encrypted,
+                    bot_user_id,
                     now,
                     now,
                 ),
             )
+
+    def update_slack_channel(
+        self,
+        team_id: str,
+        channel_id: str,
+        channel_name: str,
+    ) -> bool:
+        """Set the destination chosen after OAuth for one workspace."""
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE slack_installations
+                SET channel_id = ?, channel_name = ?, updated_at = ?
+                WHERE team_id = ?
+                """,
+                (channel_id, channel_name, now, team_id),
+            )
+        return cursor.rowcount == 1
+
+    def slack_installations(self) -> list[dict[str, object]]:
+        """Return installed workspaces for scheduled multi-tenant delivery."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT team_id, team_name, channel_id, channel_name,
+                       webhook_encrypted, bot_token_encrypted, bot_user_id,
+                       installed_at, updated_at, last_manual_run_at
+                FROM slack_installations
+                ORDER BY installed_at
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def slack_installation(self, team_id: str) -> dict[str, object] | None:
         """Return one installed workspace without decrypting its webhook."""
@@ -635,7 +709,8 @@ class Store:
             row = conn.execute(
                 """
                 SELECT team_id, team_name, channel_id, channel_name,
-                       webhook_encrypted, installed_at, updated_at,
+                       webhook_encrypted, bot_token_encrypted, bot_user_id,
+                       installed_at, updated_at,
                        last_manual_run_at
                 FROM slack_installations
                 WHERE team_id = ?

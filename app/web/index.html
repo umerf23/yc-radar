@@ -104,10 +104,19 @@
             <section class="panel setup-panel slack-connect-panel">
               <p class="section-kicker">SLACK DELIVERY</p>
               <h2 id="slackHeading">Connect your workspace</h2>
-              <p class="panel-copy" id="slackDescription">Install YC Radar through Slack’s secure approval screen and choose the destination channel there. No bot token is entered into this website.</p>
+              <p class="panel-copy" id="slackDescription">Authenticate through Slack, then choose the destination channel here. No bot token or channel ID is entered manually.</p>
               <a class="add-slack-button" id="addSlackButton" href="/slack/install"><span class="slack-grid" aria-hidden="true">✦</span> Add to Slack</a>
               <div class="workspace-card" id="workspaceCard" hidden>
                 <div><span class="status-dot ok"></span><div><strong id="workspaceName">Workspace</strong><small id="workspaceChannel">Channel</small></div></div>
+                <div class="channel-picker">
+                  <label for="slackChannelSelect">Destination channel</label>
+                  <div>
+                    <select id="slackChannelSelect" aria-label="Slack destination channel">
+                      <option value="">Loading channels…</option>
+                    </select>
+                    <button id="saveSlackChannelButton" type="button">Save channel</button>
+                  </div>
+                </div>
                 <button class="run-workspace-button" id="runWorkspaceButton">Run scan and send leads</button>
               </div>
               <p class="run-feedback" id="runFeedback" role="status"></p>
@@ -116,7 +125,7 @@
               <p class="section-kicker">HOW IT WORKS</p>
               <h2>Three secure steps</h2>
               <article><span class="action-icon">1</span><div><strong>Approve YC Radar</strong><p>Slack handles the installation and permission screen.</p></div></article>
-              <article><span class="action-icon">2</span><div><strong>Choose a channel</strong><p>Select where this workspace should receive qualified leads.</p></div></article>
+              <article><span class="action-icon">2</span><div><strong>Choose a channel</strong><p>YC Radar securely loads the workspace channels after approval.</p></div></article>
               <article><span class="action-icon">3</span><div><strong>Run the monitor</strong><p>YC Radar scans all four sources and posts results directly to that channel.</p></div></article>
             </aside>
           </div>

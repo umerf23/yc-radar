@@ -599,7 +599,7 @@ The dashboard provides:
 - live health for all four collectors
 - aggregate monitoring performance without exposing private lead details
 - an optional **Add to Slack** OAuth flow for additional workspaces
-- channel selection inside Slack's own permission screen
+- authenticated channel selection inside the YC Radar dashboard
 - an authenticated, rate-limited **Run scan and send leads** action
 - a copy-ready Pond manifest URL and setup guide
 
@@ -611,8 +611,16 @@ remain private in Slack and Pond rather than appearing on the public dashboard.
 
 The original `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` configuration remains the
 default single-workspace delivery path required by the bounty. To also let
-other workspaces install YC Radar, configure Slack OAuth with the
-`incoming-webhook` bot scope and add this redirect URL in Slack:
+other workspaces install YC Radar, configure Slack OAuth with these bot scopes:
+
+```text
+chat:write
+chat:write.public
+channels:read
+groups:read
+```
+
+Then add this redirect URL in Slack:
 
 ```text
 https://your-deployment.example/slack/oauth/callback
@@ -626,9 +634,10 @@ the encryption key with:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Use a separate long random value for `SLACK_SESSION_SECRET`. OAuth installation
-webhooks are encrypted in SQLite. Slack chooses the destination channel during
-its own approval flow, so users never paste a bot token into YC Radar.
+Use a separate long random value for `SLACK_SESSION_SECRET`. Each workspace's
+OAuth bot token is encrypted in SQLite. After approval, YC Radar lists the
+workspace's accessible channels and saves the user's selection, so users never
+paste a bot token or channel ID into YC Radar.
 
 ## Authenticated execution
 

@@ -1,4 +1,4 @@
-const state = { dashboard: null, slack: null };
+const state = { dashboard: null, slack: null, slackChannels: null };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
@@ -109,12 +109,43 @@ function renderSlack(status) {
   addButton.hidden = true;
   workspaceCard.hidden = false;
   $("#slackHeading").textContent = "Workspace connected";
-  $("#slackDescription").textContent = "Run YC Radar when you want a fresh scan. Qualified results will be delivered directly to your selected Slack channel.";
+  $("#slackDescription").textContent = status.channel_configured
+    ? "Choose where leads should be delivered, then run a fresh scan whenever you want."
+    : "Authentication succeeded. Choose the channel where YC Radar should deliver leads.";
   $("#workspaceName").textContent = status.workspace;
-  $("#workspaceChannel").textContent = status.channel.startsWith("#") ? status.channel : `#${status.channel}`;
+  $("#workspaceChannel").textContent = status.channel_configured ? `#${status.channel}` : "Channel not selected";
+  $("#runWorkspaceButton").disabled = !status.channel_configured;
   topAction.innerHTML = `${escapeHtml(status.workspace)} <span>→</span>`;
   topAction.href = "#slack";
   topAction.dataset.viewTarget = "slack";
+  if (!state.slackChannels) loadSlackChannels(status);
+}
+
+async function loadSlackChannels(status) {
+  const select = $("#slackChannelSelect");
+  const saveButton = $("#saveSlackChannelButton");
+  select.disabled = true;
+  saveButton.disabled = true;
+  try {
+    const result = await api("/api/slack/channels");
+    state.slackChannels = result.channels || [];
+    if (!state.slackChannels.length) {
+      select.innerHTML = '<option value="">No accessible channels found</option>';
+      return;
+    }
+    select.innerHTML = [
+      '<option value="">Choose a channel…</option>',
+      ...state.slackChannels.map((channel) =>
+        `<option value="${escapeHtml(channel.id)}">#${escapeHtml(channel.name)}</option>`
+      ),
+    ].join("");
+    select.value = status.channel_id || "";
+    select.disabled = false;
+    saveButton.disabled = false;
+  } catch (error) {
+    select.innerHTML = '<option value="">Could not load channels</option>';
+    showToast(error.message, true);
+  }
 }
 
 async function loadAll(quiet = false) {
@@ -189,9 +220,37 @@ $("#runWorkspaceButton").addEventListener("click", async () => {
   }
 });
 
+$("#saveSlackChannelButton").addEventListener("click", async () => {
+  const select = $("#slackChannelSelect");
+  const button = $("#saveSlackChannelButton");
+  if (!select.value) {
+    showToast("Choose a Slack channel first.", true);
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "Saving…";
+  try {
+    const result = await api("/api/slack/channel", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-YC-Radar-Action": "select-channel",
+      },
+      body: JSON.stringify({ channel_id: select.value }),
+    });
+    showToast(`#${result.channel} will receive YC Radar alerts.`);
+    await loadAll(true);
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Save channel";
+  }
+});
+
 const requestedView = location.hash.slice(1);
 if (["overview", "slack", "connection"].includes(requestedView)) selectView(requestedView);
 const slackResult = new URLSearchParams(location.search).get("slack");
-if (slackResult === "connected") showToast("Slack workspace connected successfully.");
-if (slackResult && slackResult !== "connected") showToast("Slack connection was not completed. Please try again.", true);
+if (slackResult === "choose_channel") showToast("Slack connected. Choose a destination channel.");
+if (slackResult && slackResult !== "choose_channel") showToast("Slack connection was not completed. Please try again.", true);
 loadAll(true);

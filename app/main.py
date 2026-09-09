@@ -49,7 +49,7 @@ _pond_run_lock = threading.Lock()
 
 SLACK_SESSION_COOKIE = "yc_radar_workspace"
 SLACK_STATE_COOKIE = "yc_radar_oauth_state"
-SLACK_OAUTH_SCOPES = "incoming-webhook"
+SLACK_OAUTH_SCOPES = "chat:write,chat:write.public,channels:read,groups:read"
 
 app = FastAPI(
     title="YC Radar",
@@ -72,6 +72,12 @@ class RunRequest(BaseModel):
     messages: list[dict[str, Any]]
     parameters: dict[str, Any]
     execution: dict[str, Any]
+
+
+class SlackChannelSelection(BaseModel):
+    """Destination selected by an authenticated Slack workspace."""
+
+    channel_id: str
 
 
 def fail(status_code: int, code: str, message: str) -> None:
@@ -338,9 +344,47 @@ def _oauth_store() -> Store:
     return Store(load_config().db_path)
 
 
+def _decrypt_slack_secret(value: object, settings: dict[str, str]) -> str:
+    """Decrypt a stored workspace credential or reject a stale installation."""
+    try:
+        return Fernet(settings["encryption_key"].encode()).decrypt(
+            str(value or "").encode()
+        ).decode()
+    except (InvalidToken, ValueError, TypeError):
+        fail(503, "slack_connection_invalid", "Reconnect this Slack workspace.")
+
+
+def _slack_api(
+    method: str,
+    token: str,
+    *,
+    data: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Call Slack with a workspace token and normalize transport/API errors."""
+    try:
+        response = requests.post(
+            f"https://slack.com/api/{method}",
+            headers={"Authorization": f"Bearer {token}"},
+            data=data,
+            params=params,
+            timeout=20,
+        )
+        response.raise_for_status()
+        result = response.json()
+    except (requests.RequestException, ValueError):
+        fail(502, "slack_unavailable", "Slack could not be reached. Try again.")
+    if not result.get("ok"):
+        reason = result.get("error", "unknown_error")
+        if reason in {"invalid_auth", "account_inactive", "token_revoked"}:
+            fail(401, "slack_reconnect_required", "Reconnect this Slack workspace.")
+        fail(400, "slack_api_error", f"Slack rejected the request: {reason}.")
+    return result
+
+
 @app.get("/slack/install", include_in_schema=False)
 def slack_install() -> RedirectResponse:
-    """Begin Slack's OAuth flow; Slack itself asks for the destination channel."""
+    """Begin OAuth; channel selection happens in YC Radar after approval."""
     settings = _slack_oauth_settings()
     if settings is None:
         fail(503, "slack_oauth_unavailable", "Slack installation is not configured yet.")
@@ -373,7 +417,7 @@ def slack_oauth_callback(
     state: str = "",
     error: str = "",
 ) -> RedirectResponse:
-    """Exchange Slack's short-lived code and retain an encrypted webhook."""
+    """Exchange Slack's short-lived code and retain an encrypted bot token."""
     settings = _slack_oauth_settings()
     expected_state = request.cookies.get(SLACK_STATE_COOKIE, "")
     if settings is None:
@@ -385,24 +429,29 @@ def slack_oauth_callback(
     ):
         return RedirectResponse("/?slack=invalid_state#slack")
 
-    result = requests.post(
-        "https://slack.com/api/oauth.v2.access",
-        data={
-            "client_id": settings["client_id"],
-            "client_secret": settings["client_secret"],
-            "code": code,
-            "redirect_uri": settings["redirect_uri"],
-        },
-        timeout=20,
-    ).json()
-    incoming = result.get("incoming_webhook") or {}
+    try:
+        oauth_response = requests.post(
+            "https://slack.com/api/oauth.v2.access",
+            data={
+                "client_id": settings["client_id"],
+                "client_secret": settings["client_secret"],
+                "code": code,
+                "redirect_uri": settings["redirect_uri"],
+            },
+            timeout=20,
+        )
+        oauth_response.raise_for_status()
+        result = oauth_response.json()
+    except (requests.RequestException, ValueError):
+        return RedirectResponse("/?slack=oauth_failed#slack")
     team = result.get("team") or {}
-    if not result.get("ok") or not incoming.get("url") or not team.get("id"):
+    token = result.get("access_token") or ""
+    if not result.get("ok") or not token or not team.get("id"):
         return RedirectResponse("/?slack=oauth_failed#slack")
 
     try:
         encrypted = Fernet(settings["encryption_key"].encode()).encrypt(
-            incoming["url"].encode()
+            token.encode()
         ).decode()
     except (ValueError, TypeError):
         return RedirectResponse("/?slack=server_config#slack")
@@ -410,11 +459,10 @@ def slack_oauth_callback(
     _oauth_store().save_slack_installation(
         team_id=team["id"],
         team_name=team.get("name") or "Slack workspace",
-        channel_id=incoming.get("channel_id") or "",
-        channel_name=incoming.get("channel") or "Selected channel",
-        webhook_encrypted=encrypted,
+        bot_token_encrypted=encrypted,
+        bot_user_id=result.get("bot_user_id") or "",
     )
-    response = RedirectResponse("/?slack=connected#slack")
+    response = RedirectResponse("/?slack=choose_channel#slack")
     response.delete_cookie(SLACK_STATE_COOKIE)
     response.set_cookie(
         SLACK_SESSION_COOKIE,
@@ -442,7 +490,80 @@ def slack_status(request: Request) -> dict[str, Any]:
         "connected": True,
         "workspace": installation["team_name"],
         "channel": installation["channel_name"],
+        "channel_id": installation["channel_id"],
+        "channel_configured": bool(installation["channel_id"]),
         "last_manual_run_at": installation["last_manual_run_at"],
+    }
+
+
+@app.get("/api/slack/channels")
+def slack_channels(request: Request) -> dict[str, Any]:
+    """List public channels and private channels the installed bot can access."""
+    settings = _slack_oauth_settings()
+    if settings is None:
+        fail(503, "slack_oauth_unavailable", "Slack installation is not configured.")
+    team_id = _session_team(request, settings["session_secret"])
+    installation = _oauth_store().slack_installation(team_id) if team_id else None
+    if installation is None:
+        fail(401, "slack_not_connected", "Connect a Slack workspace first.")
+    token = _decrypt_slack_secret(installation["bot_token_encrypted"], settings)
+
+    channels: list[dict[str, str]] = []
+    cursor = ""
+    for _ in range(10):
+        result = _slack_api(
+            "conversations.list",
+            token,
+            params={
+                "types": "public_channel,private_channel",
+                "exclude_archived": "true",
+                "limit": 200,
+                "cursor": cursor,
+            },
+        )
+        channels.extend(
+            {"id": channel["id"], "name": channel.get("name") or channel["id"]}
+            for channel in result.get("channels", [])
+            if channel.get("id") and not channel.get("is_archived")
+        )
+        cursor = (result.get("response_metadata") or {}).get("next_cursor") or ""
+        if not cursor:
+            break
+    channels.sort(key=lambda channel: channel["name"].lower())
+    return {"workspace": installation["team_name"], "channels": channels}
+
+
+@app.post("/api/slack/channel")
+def select_slack_channel(
+    selection: SlackChannelSelection,
+    request: Request,
+    action_header: str | None = Header(default=None, alias="X-YC-Radar-Action"),
+) -> dict[str, Any]:
+    """Validate and save a channel for the browser's authenticated workspace."""
+    settings = _slack_oauth_settings()
+    if settings is None or action_header != "select-channel":
+        fail(403, "forbidden", "Slack workspace authorization is required.")
+    if not re.fullmatch(r"[CG][A-Z0-9]+", selection.channel_id):
+        fail(400, "invalid_channel", "Select a valid Slack channel.")
+    team_id = _session_team(request, settings["session_secret"])
+    store = _oauth_store()
+    installation = store.slack_installation(team_id) if team_id else None
+    if installation is None:
+        fail(401, "slack_not_connected", "Connect a Slack workspace first.")
+    token = _decrypt_slack_secret(installation["bot_token_encrypted"], settings)
+    result = _slack_api(
+        "conversations.info",
+        token,
+        params={"channel": selection.channel_id},
+    )
+    channel = result.get("channel") or {}
+    if channel.get("is_archived") or not channel.get("name"):
+        fail(400, "invalid_channel", "Choose an active Slack channel.")
+    store.update_slack_channel(team_id, selection.channel_id, channel["name"])
+    return {
+        "status": "saved",
+        "workspace": installation["team_name"],
+        "channel": channel["name"],
     }
 
 
@@ -479,6 +600,38 @@ def _workspace_blocks(candidate: dict[str, object]) -> list[dict[str, Any]]:
     return blocks
 
 
+def _send_workspace_message(
+    installation: dict[str, object],
+    settings: dict[str, str],
+    text: str,
+    blocks: list[dict[str, Any]] | None = None,
+) -> None:
+    """Deliver through a bot token, retaining legacy webhook compatibility."""
+    encrypted_token = installation.get("bot_token_encrypted")
+    if encrypted_token:
+        token = _decrypt_slack_secret(encrypted_token, settings)
+        data: dict[str, Any] = {
+            "channel": installation["channel_id"],
+            "text": text,
+            "unfurl_links": "false",
+            "unfurl_media": "false",
+        }
+        if blocks:
+            data["blocks"] = json.dumps(blocks)
+        _slack_api("chat.postMessage", token, data=data)
+        return
+
+    webhook_url = _decrypt_slack_secret(
+        installation.get("webhook_encrypted"), settings
+    )
+    response = requests.post(
+        webhook_url,
+        json={"text": text, **({"blocks": blocks} if blocks else {})},
+        timeout=20,
+    )
+    response.raise_for_status()
+
+
 @app.post("/api/slack/run")
 def run_for_slack_workspace(
     request: Request,
@@ -493,16 +646,11 @@ def run_for_slack_workspace(
     installation = store.slack_installation(team_id) if team_id else None
     if installation is None:
         fail(401, "slack_not_connected", "Connect a Slack workspace first.")
+    if not installation["channel_id"]:
+        fail(409, "slack_channel_required", "Choose a Slack channel first.")
     first_workspace_run = installation["last_manual_run_at"] is None
     if not store.claim_slack_run(team_id):
         fail(429, "run_cooldown", "Please wait five minutes before running again.")
-
-    try:
-        webhook_url = Fernet(settings["encryption_key"].encode()).decrypt(
-            str(installation["webhook_encrypted"]).encode()
-        ).decode()
-    except (InvalidToken, ValueError, TypeError):
-        fail(503, "slack_connection_invalid", "Reconnect this Slack workspace.")
 
     summary = run_cycle(load_config(), send_summary=False)
     started_at = summary.get("started_at", "")
@@ -517,27 +665,22 @@ def run_for_slack_workspace(
     if not delivered and first_workspace_run:
         delivered = store.recent_candidates(limit=5)
     for candidate in delivered:
-        response = requests.post(
-            webhook_url,
-            json={
-                "text": f"YC Radar: {candidate['company_name']}",
-                "blocks": _workspace_blocks(candidate),
-            },
-            timeout=20,
+        _send_workspace_message(
+            installation,
+            settings,
+            f"YC Radar: {candidate['company_name']}",
+            _workspace_blocks(candidate),
         )
-        response.raise_for_status()
     if not delivered:
-        requests.post(
-            webhook_url,
-            json={
-                "text": (
-                    "YC Radar scan complete — "
-                    f"{summary.get('examined', 0)} examined, "
-                    "no new qualified leads."
-                )
-            },
-            timeout=20,
-        ).raise_for_status()
+        _send_workspace_message(
+            installation,
+            settings,
+            (
+                "YC Radar scan complete — "
+                f"{summary.get('examined', 0)} examined, "
+                "no new qualified leads."
+            ),
+        )
     return {"status": "completed", "delivered": len(delivered), "summary": summary}
 
 
