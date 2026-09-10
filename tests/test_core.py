@@ -8,6 +8,7 @@ failure-safe incremental windows, and X provider error classification.
 import pytest
 
 from app.classifier import Classifier
+from app.main import _pond_leads_text
 from app.models import (
     STATUS_CONFIRMED_SPEEDRUN,
     STATUS_CONFIRMED_YC,
@@ -197,6 +198,50 @@ def test_bot_oauth_installation_can_select_channel(store):
     assert after["channel_id"] == "C456"
     assert after["channel_name"] == "yc-leads"
     assert len(store.slack_installations()) == 1
+
+
+def test_pond_run_response_includes_qualified_lead_details():
+    summary = {
+        "examined": 48,
+        "new": 1,
+        "alerted": 1,
+        "early_signals": 1,
+        "sources_run": ["yc_directory", "x_twitter"],
+    }
+    leads = [
+        {
+            "company_name": "Signal Labs",
+            "status": "EARLY_SIGNAL",
+            "batch": "YC F26",
+            "source": "x_twitter",
+            "confidence": 0.92,
+            "founder_handle": "@founder",
+            "url": "https://x.com/founder/status/123",
+        }
+    ]
+
+    text = _pond_leads_text(summary, leads)
+
+    assert "## New qualified leads" in text
+    assert "### 1. Signal Labs" in text
+    assert "Confidence: 92%" in text
+    assert "@founder" in text
+    assert "https://x.com/founder/status/123" in text
+
+
+def test_pond_run_response_explains_when_no_leads_qualify():
+    text = _pond_leads_text(
+        {
+            "examined": 12,
+            "new": 0,
+            "alerted": 0,
+            "early_signals": 0,
+            "sources_run": ["yc_directory"],
+        },
+        [],
+    )
+
+    assert "No new qualified leads were found in this run." in text
 
 
 # ---------- official register ----------

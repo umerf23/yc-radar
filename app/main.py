@@ -168,7 +168,7 @@ def manifest() -> dict[str, Any]:
                 "description": (
                     "Run YC Radar now across YC Directory, a16z Speedrun, X, and "
                     "LinkedIn, send any new qualified alerts to Slack, and return "
-                    "a summary."
+                    "the qualified lead details directly in the Pond chat."
                 ),
                 "input_schema": empty_parameters,
             },
@@ -803,6 +803,79 @@ def _status_text() -> str:
     )
 
 
+def _pond_safe_text(value: object, fallback: str = "Unknown") -> str:
+    """Keep one untrusted candidate value readable inside Pond markdown."""
+    text = " ".join(str(value or "").split()).strip()
+    return text or fallback
+
+
+def _pond_run_leads(
+    config: Any,
+    started_at: str,
+    limit: int = 20,
+) -> tuple[list[dict[str, object]], bool]:
+    """Return leads delivered during this Pond-triggered monitoring cycle."""
+    candidates = Store(config.db_path).recent_candidates(limit=250)
+    matching = [
+        candidate
+        for candidate in candidates
+        if str(candidate["first_seen_at"]) >= started_at
+    ]
+    return matching[:limit], len(matching) > limit
+
+
+def _pond_leads_text(
+    summary: dict[str, Any],
+    leads: list[dict[str, object]],
+    truncated: bool = False,
+) -> str:
+    """Build the Pond chat response with summary and actionable lead details."""
+    lines = [
+        "YC Radar monitoring cycle completed.",
+        "",
+        f"- Examined: {summary.get('examined', 0)}",
+        f"- New candidates: {summary.get('new', 0)}",
+        f"- Qualified leads: {summary.get('alerted', len(leads))}",
+        f"- Slack alerts: {summary.get('alerted', 0)}",
+        f"- Early signals: {summary.get('early_signals', 0)}",
+        "- Sources: " + ", ".join(summary.get("sources_run", [])),
+        "",
+    ]
+
+    if not leads:
+        lines.append("No new qualified leads were found in this run.")
+        return "\n".join(lines)
+
+    lines.append("## New qualified leads")
+    for index, lead in enumerate(leads, start=1):
+        confidence = float(lead.get("confidence") or 0)
+        lines.extend(
+            [
+                "",
+                f"### {index}. {_pond_safe_text(lead.get('company_name'), 'Company not stated')}",
+                f"- Status: {_pond_safe_text(lead.get('status'))}",
+                f"- Batch: {_pond_safe_text(lead.get('batch'))}",
+                f"- Source: {_pond_safe_text(lead.get('source'))}",
+                f"- Confidence: {confidence:.0%}",
+            ]
+        )
+        if lead.get("founder_handle"):
+            lines.append(
+                f"- Founder: {_pond_safe_text(lead.get('founder_handle'))}"
+            )
+        if lead.get("url"):
+            lines.append(f"- Original source: {_pond_safe_text(lead.get('url'))}")
+
+    if truncated:
+        lines.extend(
+            [
+                "",
+                "More than 20 leads qualified. The remaining alerts are available in Slack.",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def run_cycle(
     config: Any,
     send_summary: bool = True,
@@ -873,7 +946,8 @@ def create_run(
                 },
             }
         else:
-            summary = run_cycle(load_config(), send_summary=False)
+            config = load_config()
+            summary = run_cycle(config, send_summary=False)
 
             if "error" in summary:
                 response = {
@@ -889,16 +963,11 @@ def create_run(
                     },
                 }
             else:
-                text = (
-                    "YC Radar monitoring cycle completed.\n\n"
-                    f"- Examined: {summary.get('examined', 0)}\n"
-                    f"- New candidates: {summary.get('new', 0)}\n"
-                    f"- Classified: {summary.get('classified', 0)}\n"
-                    f"- Slack alerts: {summary.get('alerted', 0)}\n"
-                    f"- Early signals: {summary.get('early_signals', 0)}\n"
-                    "- Sources: "
-                    + ", ".join(summary.get("sources_run", []))
+                leads, truncated = _pond_run_leads(
+                    config,
+                    str(summary.get("started_at", "")),
                 )
+                text = _pond_leads_text(summary, leads, truncated)
                 response = {
                     "run_id": run.run_id,
                     "status": "completed",

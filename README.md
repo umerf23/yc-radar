@@ -558,6 +558,13 @@ A single provider failure does not abort the entire run.
 
 YC Radar exposes a synchronous Pond-compatible agent interface.
 
+When a Pond user runs `run_monitoring_cycle`, the response includes both the
+monitoring summary and up to 20 newly qualified leads with company, status,
+batch, source, confidence, founder handle, and original source URL. The same
+qualified leads continue to be delivered to the configured Slack channel.
+When nothing qualifies, Pond explicitly reports that no new qualified leads
+were found rather than returning old or duplicate results.
+
 ## Public discovery
 
 ```text
