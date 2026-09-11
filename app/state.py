@@ -1,12 +1,15 @@
 """
 Persistent state for the bot.
 
-Three responsibilities:
-  1. Remember every candidate ever alerted on, so nothing repeats.
+Four responsibilities:
+  1. Remember every candidate ever classified, so collection work is not
+     repeated.
   2. Maintain a register of what each programme has officially published,
      which is what makes early detection possible.
   3. Remember each source's last successful poll separately from failed
      attempts, so provider outages never create an incremental-search gap.
+  4. Track Slack delivery per workspace, so every workspace receives each
+     qualified lead once without suppressing delivery to other workspaces.
 
 SQLite is used deliberately over a JSON file: it survives concurrent
 writes, gives us indexed lookups as the table grows, and needs no server
@@ -72,6 +75,17 @@ CREATE TABLE IF NOT EXISTS slack_installations (
     updated_at          TEXT NOT NULL,
     last_manual_run_at  TEXT
 );
+
+CREATE TABLE IF NOT EXISTS slack_deliveries (
+    team_id       TEXT NOT NULL,
+    dedup_key     TEXT NOT NULL,
+    channel_id    TEXT NOT NULL,
+    delivered_at TEXT NOT NULL,
+    PRIMARY KEY (team_id, dedup_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_slack_deliveries_team
+ON slack_deliveries(team_id);
 """
 
 
@@ -607,6 +621,77 @@ class Store:
             }
             for row in rows
         ]
+
+    def pending_slack_candidates(
+        self,
+        team_id: str,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        """Return qualified leads not yet delivered to one Slack workspace."""
+        safe_limit = max(1, min(limit, 500))
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    candidate.dedup_key,
+                    candidate.company_name,
+                    candidate.source,
+                    candidate.status,
+                    candidate.batch,
+                    candidate.url,
+                    candidate.founder_handle,
+                    candidate.confidence,
+                    candidate.alerted,
+                    candidate.first_seen_at,
+                    candidate.last_seen_at
+                FROM seen_candidates AS candidate
+                LEFT JOIN slack_deliveries AS delivery
+                  ON delivery.team_id = ?
+                 AND delivery.dedup_key = candidate.dedup_key
+                WHERE candidate.alerted = 1
+                  AND delivery.dedup_key IS NULL
+                ORDER BY candidate.first_seen_at ASC
+                LIMIT ?
+                """,
+                (team_id, safe_limit),
+            ).fetchall()
+        return [{**dict(row), "alerted": True} for row in rows]
+
+    def record_slack_delivery(
+        self,
+        team_id: str,
+        dedup_key: str,
+        channel_id: str,
+    ) -> None:
+        """Mark one lead delivered only after Slack accepts the message."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO slack_deliveries (
+                    team_id, dedup_key, channel_id, delivered_at
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (team_id, dedup_key, channel_id, datetime.now(UTC).isoformat()),
+            )
+
+    def pending_slack_count(self, team_id: str) -> int:
+        """Count qualified leads still waiting for one Slack workspace."""
+        with self._connect() as conn:
+            return int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM seen_candidates AS candidate
+                    LEFT JOIN slack_deliveries AS delivery
+                      ON delivery.team_id = ?
+                     AND delivery.dedup_key = candidate.dedup_key
+                    WHERE candidate.alerted = 1
+                      AND delivery.dedup_key IS NULL
+                    """,
+                    (team_id,),
+                ).fetchone()[0]
+            )
 
     # ---------- Slack OAuth installations ----------
 

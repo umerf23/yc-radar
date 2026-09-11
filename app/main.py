@@ -39,7 +39,7 @@ from app.pipeline import Pipeline
 from app.state import Store
 
 POND_PROTOCOL_VERSION = "1.0"
-POND_AGENT_VERSION = "1.1.1"
+POND_AGENT_VERSION = "1.2.0"
 
 # Shared state between the scheduler thread and the HTTP handlers.
 _last_run: dict[str, Any] = {}
@@ -637,7 +637,7 @@ def run_for_slack_workspace(
     request: Request,
     action_header: str | None = Header(default=None, alias="X-YC-Radar-Action"),
 ) -> dict[str, Any]:
-    """Run the shared monitor and deliver this cycle's leads to one workspace."""
+    """Run the monitor and deliver every lead pending for this workspace."""
     settings = _slack_oauth_settings()
     if settings is None or action_header != "run":
         fail(403, "forbidden", "Slack workspace authorization is required.")
@@ -648,40 +648,40 @@ def run_for_slack_workspace(
         fail(401, "slack_not_connected", "Connect a Slack workspace first.")
     if not installation["channel_id"]:
         fail(409, "slack_channel_required", "Choose a Slack channel first.")
-    first_workspace_run = installation["last_manual_run_at"] is None
     if not store.claim_slack_run(team_id):
         fail(429, "run_cooldown", "Please wait five minutes before running again.")
 
     summary = run_cycle(load_config(), send_summary=False)
-    started_at = summary.get("started_at", "")
-    delivered = [
-        item
-        for item in store.recent_candidates(limit=250)
-        if str(item["first_seen_at"]) >= started_at
-    ]
-    # A newly connected workspace should receive something useful even when
-    # the global scheduler already saw every result in this particular scan.
-    # Only the first manual run gets this small recent backlog.
-    if not delivered and first_workspace_run:
-        delivered = store.recent_candidates(limit=5)
-    for candidate in delivered:
+    if "error" in summary:
+        fail(502, "monitoring_failed", "YC Radar could not complete the scan.")
+
+    # Candidate discovery is global, but delivery deduplication is scoped to
+    # team_id. An alert sent to one workspace therefore remains pending for
+    # every other workspace until Slack accepts it there too.
+    pending = store.pending_slack_candidates(team_id, limit=100)
+    delivered = 0
+    for candidate in pending:
         _send_workspace_message(
             installation,
             settings,
             f"YC Radar: {candidate['company_name']}",
             _workspace_blocks(candidate),
         )
-    if not delivered:
-        _send_workspace_message(
-            installation,
-            settings,
-            (
-                "YC Radar scan complete — "
-                f"{summary.get('examined', 0)} examined, "
-                "no new qualified leads."
-            ),
+        store.record_slack_delivery(
+            team_id,
+            str(candidate["dedup_key"]),
+            str(installation["channel_id"]),
         )
-    return {"status": "completed", "delivered": len(delivered), "summary": summary}
+        delivered += 1
+
+    # Intentionally send no Slack summary when nothing qualifies. The API
+    # response still tells the dashboard that the scan completed quietly.
+    return {
+        "status": "completed",
+        "delivered": delivered,
+        "remaining": store.pending_slack_count(team_id),
+        "summary": summary,
+    }
 
 
 @app.get(

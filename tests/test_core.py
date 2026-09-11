@@ -200,6 +200,44 @@ def test_bot_oauth_installation_can_select_channel(store):
     assert len(store.slack_installations()) == 1
 
 
+def test_slack_delivery_is_deduplicated_per_workspace(store):
+    first = _candidate("Signal Labs", confidence=0.94)
+    second = _candidate("Launch AI", confidence=0.88)
+    store.record(first, alerted=True)
+    store.record(second, alerted=True)
+
+    team_a = store.pending_slack_candidates("TEAM-A")
+    team_b = store.pending_slack_candidates("TEAM-B")
+
+    assert [row["company_name"] for row in team_a] == [
+        "Signal Labs",
+        "Launch AI",
+    ]
+    assert [row["company_name"] for row in team_b] == [
+        "Signal Labs",
+        "Launch AI",
+    ]
+
+    store.record_slack_delivery("TEAM-A", str(team_a[0]["dedup_key"]), "CHAN-A")
+
+    assert [
+        row["company_name"]
+        for row in store.pending_slack_candidates("TEAM-A")
+    ] == ["Launch AI"]
+    assert len(store.pending_slack_candidates("TEAM-B")) == 2
+    assert store.pending_slack_count("TEAM-A") == 1
+    assert store.pending_slack_count("TEAM-B") == 2
+
+
+def test_rejected_candidates_never_enter_workspace_backlog(store):
+    store.record(_candidate("Qualified"), alerted=True)
+    store.record(_candidate("Rejected"), alerted=False)
+
+    pending = store.pending_slack_candidates("TEAM-A")
+
+    assert [row["company_name"] for row in pending] == ["Qualified"]
+
+
 def test_pond_run_response_includes_qualified_lead_details():
     summary = {
         "examined": 48,

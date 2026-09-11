@@ -206,9 +206,14 @@ $("#runWorkspaceButton").addEventListener("click", async () => {
   feedback.textContent = "This can take several minutes. Keep this page open.";
   try {
     const result = await api("/api/slack/run", { method: "POST", headers: { "X-YC-Radar-Action": "run" } });
-    feedback.textContent = result.delivered
-      ? `${result.delivered} new qualified lead${result.delivered === 1 ? " was" : "s were"} sent to Slack.`
-      : "Scan complete. No new qualified leads; a summary was sent to Slack.";
+    if (result.delivered) {
+      const backlog = result.remaining
+        ? ` ${result.remaining} more qualified lead${result.remaining === 1 ? " remains" : "s remain"}; run again after the cooldown.`
+        : "";
+      feedback.textContent = `${result.delivered} qualified lead${result.delivered === 1 ? " was" : "s were"} sent to Slack.${backlog}`;
+    } else {
+      feedback.textContent = "Scan complete. No undelivered qualified leads; Slack was left unchanged.";
+    }
     showToast("Slack delivery completed.");
     await loadAll(true);
   } catch (error) {

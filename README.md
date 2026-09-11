@@ -41,7 +41,7 @@ YC Radar was built as a **single-workspace personal Slack monitoring agent** for
 | Monitor LinkedIn | `LinkedInSource` searches publicly indexed LinkedIn posts through Serper, with optional Apify enrichment |
 | Highlight founder acceptance before official listing | Social posts are classified and compared with the persistent official register; same-cycle first-seen protection prevents newly discovered directory entries from suppressing an earlier social signal |
 | Persistent/incremental monitoring | SQLite stores seen candidates, official companies, source run state, first-seen timestamps, and Pond run results |
-| Avoid duplicate alerts | Stable dedup keys plus persistent `alerted` state prevent re-alerting |
+| Avoid duplicate alerts | Stable dedup keys prevent repeated classification, while a per-workspace delivery ledger sends each qualified lead once to every connected workspace |
 | Slack delivery | Qualified candidates are routed to a configured Slack channel, with optional early/confirmed channel overrides |
 | Extensible architecture | Every source implements the same `Source` interface and produces the same `Candidate` model |
 | Health/operational visibility | `/health` exposes run summary, source status, and persistent totals |
@@ -646,6 +646,15 @@ OAuth bot token is encrypted in SQLite. After approval, YC Radar lists the
 workspace's accessible channels and saves the user's selection, so users never
 paste a bot token or channel ID into YC Radar.
 
+Qualified-lead delivery is tracked independently for every Slack workspace.
+When a workspace runs YC Radar, it receives up to 100 old and new qualified
+leads that have not previously been delivered to that workspace. A lead sent
+to one workspace remains eligible for every other workspace. Delivery is
+recorded only after Slack accepts the message, so an interrupted run safely
+resumes its remaining backlog. If no undelivered qualified leads exist, YC
+Radar posts nothing to Slack. A workspace with more than 100 pending leads can
+run again after the five-minute cooldown to continue the backlog.
+
 ## Authenticated execution
 
 ```text
@@ -979,9 +988,9 @@ Pond access secrets.
 ## Slack workspace routes
 
 - `GET /slack/install` starts Slack OAuth.
-- `GET /slack/oauth/callback` completes installation and stores the encrypted webhook.
+- `GET /slack/oauth/callback` completes installation and stores encrypted workspace credentials.
 - `GET /api/slack/status` reports only the current browser's workspace and channel.
-- `POST /api/slack/run` runs a scan for a connected workspace, applies a five-minute cooldown, and sends results to its selected channel.
+- `POST /api/slack/run` runs a scan for a connected workspace, applies a five-minute cooldown, and sends up to 100 old and new qualified leads not previously delivered to that workspace. It sends no empty-run message.
 
 ## `GET /health`
 
