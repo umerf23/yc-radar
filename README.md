@@ -653,7 +653,9 @@ to one workspace remains eligible for every other workspace. Delivery is
 recorded only after Slack accepts the message, so an interrupted run safely
 resumes its remaining backlog. If no undelivered qualified leads exist, YC
 Radar posts nothing to Slack. A workspace with more than 100 pending leads can
-run again after the five-minute cooldown to continue the backlog.
+run again after the five-minute cooldown to continue the backlog. Leads are
+grouped into batches of ten cards per Slack message to stay within Slack's
+message limits and reduce rate-limit pressure.
 
 ## Authenticated execution
 

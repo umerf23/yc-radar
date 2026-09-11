@@ -600,6 +600,18 @@ def _workspace_blocks(candidate: dict[str, object]) -> list[dict[str, Any]]:
     return blocks
 
 
+def _workspace_batch_blocks(
+    candidates: list[dict[str, object]],
+) -> list[dict[str, Any]]:
+    """Combine up to ten lead cards without exceeding Slack's block limit."""
+    blocks: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if blocks:
+            blocks.append({"type": "divider"})
+        blocks.extend(_workspace_blocks(candidate))
+    return blocks
+
+
 def _send_workspace_message(
     installation: dict[str, object],
     settings: dict[str, str],
@@ -660,19 +672,24 @@ def run_for_slack_workspace(
     # every other workspace until Slack accepts it there too.
     pending = store.pending_slack_candidates(team_id, limit=100)
     delivered = 0
-    for candidate in pending:
+    batch_size = 10
+    for start in range(0, len(pending), batch_size):
+        batch = pending[start : start + batch_size]
         _send_workspace_message(
             installation,
             settings,
-            f"YC Radar: {candidate['company_name']}",
-            _workspace_blocks(candidate),
+            f"YC Radar: {len(batch)} qualified lead(s)",
+            _workspace_batch_blocks(batch),
         )
-        store.record_slack_delivery(
-            team_id,
-            str(candidate["dedup_key"]),
-            str(installation["channel_id"]),
-        )
-        delivered += 1
+        for candidate in batch:
+            store.record_slack_delivery(
+                team_id,
+                str(candidate["dedup_key"]),
+                str(installation["channel_id"]),
+            )
+            delivered += 1
+        if start + batch_size < len(pending):
+            time.sleep(1.1)
 
     # Intentionally send no Slack summary when nothing qualifies. The API
     # response still tells the dashboard that the scan completed quietly.

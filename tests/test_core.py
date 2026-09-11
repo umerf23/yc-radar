@@ -8,7 +8,7 @@ failure-safe incremental windows, and X provider error classification.
 import pytest
 
 from app.classifier import Classifier
-from app.main import _pond_leads_text
+from app.main import _pond_leads_text, _workspace_batch_blocks
 from app.models import (
     STATUS_CONFIRMED_SPEEDRUN,
     STATUS_CONFIRMED_YC,
@@ -236,6 +236,33 @@ def test_rejected_candidates_never_enter_workspace_backlog(store):
     pending = store.pending_slack_candidates("TEAM-A")
 
     assert [row["company_name"] for row in pending] == ["Qualified"]
+
+
+def test_workspace_batches_keep_leads_visually_separate():
+    candidates = [
+        {
+            "company_name": "Signal Labs",
+            "status": "EARLY_SIGNAL",
+            "batch": "YC F26",
+            "source": "x_twitter",
+            "confidence": 0.92,
+            "url": "https://example.com/signal",
+        },
+        {
+            "company_name": "Launch AI",
+            "status": "CONFIRMED_YC",
+            "batch": "YC F26",
+            "source": "yc_directory",
+            "confidence": 1.0,
+            "url": "https://example.com/launch",
+        },
+    ]
+
+    blocks = _workspace_batch_blocks(candidates)
+
+    assert sum(block["type"] == "header" for block in blocks) == 2
+    assert sum(block["type"] == "divider" for block in blocks) == 1
+    assert len(blocks) < 50
 
 
 def test_pond_run_response_includes_qualified_lead_details():
