@@ -8,7 +8,11 @@ failure-safe incremental windows, and X provider error classification.
 import pytest
 
 from app.classifier import Classifier
-from app.main import _pond_leads_text, _workspace_batch_blocks
+from app.main import (
+    _label_workspace_candidates,
+    _pond_leads_text,
+    _workspace_batch_blocks,
+)
 from app.models import (
     STATUS_CONFIRMED_SPEEDRUN,
     STATUS_CONFIRMED_YC,
@@ -238,7 +242,7 @@ def test_rejected_candidates_never_enter_workspace_backlog(store):
     assert [row["company_name"] for row in pending] == ["Qualified"]
 
 
-def test_workspace_batches_keep_leads_visually_separate():
+def test_workspace_batches_label_previous_and_new_leads():
     candidates = [
         {
             "company_name": "Signal Labs",
@@ -247,6 +251,8 @@ def test_workspace_batches_keep_leads_visually_separate():
             "source": "x_twitter",
             "confidence": 0.92,
             "url": "https://example.com/signal",
+            "first_seen_at": "2026-09-10T12:00:00+00:00",
+            "is_previous": True,
         },
         {
             "company_name": "Launch AI",
@@ -255,6 +261,8 @@ def test_workspace_batches_keep_leads_visually_separate():
             "source": "yc_directory",
             "confidence": 1.0,
             "url": "https://example.com/launch",
+            "first_seen_at": "2026-09-11T12:00:00+00:00",
+            "is_previous": False,
         },
     ]
 
@@ -262,7 +270,42 @@ def test_workspace_batches_keep_leads_visually_separate():
 
     assert sum(block["type"] == "header" for block in blocks) == 2
     assert sum(block["type"] == "divider" for block in blocks) == 1
+    headings = [
+        block["text"]["text"]
+        for block in blocks
+        if block["type"] == "header"
+    ]
+    assert headings == [
+        "PREVIOUS EARLY SIGNAL — founder announced before listing",
+        "NEW YC COMPANY",
+    ]
+    contexts = [
+        block["elements"][0]["text"]
+        for block in blocks
+        if block["type"] == "context"
+    ]
+    assert contexts[0].startswith("Previously discovered:")
+    assert contexts[1].startswith("Discovered:")
     assert len(blocks) < 50
+
+
+def test_workspace_candidate_age_is_relative_to_current_scan():
+    candidates = [
+        {"first_seen_at": "2026-09-11T11:59:59+00:00"},
+        {"first_seen_at": "2026-09-11T12:00:00+00:00"},
+        {"first_seen_at": "2026-09-11T12:00:01+00:00"},
+    ]
+
+    labelled = _label_workspace_candidates(
+        candidates,
+        "2026-09-11T12:00:00+00:00",
+    )
+
+    assert [candidate["is_previous"] for candidate in labelled] == [
+        True,
+        False,
+        False,
+    ]
 
 
 def test_pond_run_response_includes_qualified_lead_details():

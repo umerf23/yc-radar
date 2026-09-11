@@ -655,7 +655,9 @@ resumes its remaining backlog. If no undelivered qualified leads exist, YC
 Radar posts nothing to Slack. A workspace with more than 100 pending leads can
 run again after the five-minute cooldown to continue the backlog. Leads are
 grouped into batches of ten cards per Slack message to stay within Slack's
-message limits and reduce rate-limit pressure.
+message limits and reduce rate-limit pressure. Leads discovered before the
+current workspace scan are explicitly labelled `PREVIOUS`; only leads first
+discovered during that scan are labelled `NEW`.
 
 ## Authenticated execution
 

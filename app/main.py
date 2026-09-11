@@ -569,11 +569,18 @@ def select_slack_channel(
 
 def _workspace_blocks(candidate: dict[str, object]) -> list[dict[str, Any]]:
     """Build a compact Slack alert from the persisted safe candidate fields."""
-    heading = (
-        "EARLY SIGNAL — founder announced before official listing"
-        if candidate["status"] == "EARLY_SIGNAL"
-        else "NEW ACCELERATOR COMPANY"
-    )
+    previous = bool(candidate.get("is_previous"))
+    prefix = "PREVIOUS" if previous else "NEW"
+    status = str(candidate["status"])
+    batch = str(candidate.get("batch") or "").lower()
+    if status == "EARLY_SIGNAL":
+        heading = f"{prefix} EARLY SIGNAL — founder announced before listing"
+    elif status == "LINKEDIN_COMPANY_SIGNAL":
+        heading = f"{prefix} LINKEDIN COMPANY SIGNAL"
+    elif status == "CONFIRMED_SPEEDRUN" or "speedrun" in batch:
+        heading = f"{prefix} SPEEDRUN COMPANY"
+    else:
+        heading = f"{prefix} YC COMPANY"
     fields = [
         f"*Company*\n{candidate['company_name'] or 'Not stated'}",
         f"*Batch*\n{candidate['batch'] or 'Unknown'}",
@@ -597,6 +604,19 @@ def _workspace_blocks(candidate: dict[str, object]) -> list[dict[str, Any]]:
                 },
             }
         )
+    if candidate.get("first_seen_at"):
+        discovered_label = "Previously discovered" if previous else "Discovered"
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"{discovered_label}: {candidate['first_seen_at']}",
+                    }
+                ],
+            }
+        )
     return blocks
 
 
@@ -610,6 +630,19 @@ def _workspace_batch_blocks(
             blocks.append({"type": "divider"})
         blocks.extend(_workspace_blocks(candidate))
     return blocks
+
+
+def _label_workspace_candidates(
+    candidates: list[dict[str, object]],
+    cycle_started_at: str,
+) -> list[dict[str, object]]:
+    """Label persisted backlog leads separately from this scan's new leads."""
+    for candidate in candidates:
+        candidate["is_previous"] = (
+            not cycle_started_at
+            or str(candidate.get("first_seen_at") or "") < cycle_started_at
+        )
+    return candidates
 
 
 def _send_workspace_message(
@@ -670,7 +703,10 @@ def run_for_slack_workspace(
     # Candidate discovery is global, but delivery deduplication is scoped to
     # team_id. An alert sent to one workspace therefore remains pending for
     # every other workspace until Slack accepts it there too.
-    pending = store.pending_slack_candidates(team_id, limit=100)
+    pending = _label_workspace_candidates(
+        store.pending_slack_candidates(team_id, limit=100),
+        str(summary.get("started_at", "")),
+    )
     delivered = 0
     batch_size = 10
     for start in range(0, len(pending), batch_size):
